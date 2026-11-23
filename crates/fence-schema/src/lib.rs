@@ -13,8 +13,12 @@
 //! - an arrow `t->q` where `t` points at another type `W` and `q` is a union of plain relations on `W`: the arrow is
 //!   kind `arrow`, and each relation on `W` it reaches is kind `via`, reached `through` `t`.
 //!
+//! - a direct or via relation may also accept a SUBJECT SET `T#r` (`group#member`), where `r` is a plain relation on
+//!   `T` whose allowed types are object types: `r` on `T` is kind `set` (its tuples are memberships).
+//!
 //! Refused, each with its reason: exclusion (`-`, removing a tuple can grant), intersection (`&`, `.all()`), caveats,
-//! expiring relationships, wildcards (`user:*`), subject sets (`group#member`), and an arrow more than one hop away.
+//! expiring relationships, wildcards (`user:*`), a subject set that is itself a permission or holds further subject
+//! sets (nested groups), and an arrow more than one hop away.
 
 mod parse;
 
@@ -74,6 +78,8 @@ pub enum Kind {
     Direct,
     Arrow,
     Via,
+    /// A relation whose tuples are memberships of a subject set another view relation grants to.
+    Set,
 }
 
 impl Kind {
@@ -82,6 +88,7 @@ impl Kind {
             Kind::Direct => "direct",
             Kind::Arrow => "arrow",
             Kind::Via => "via",
+            Kind::Set => "set",
         }
     }
 }
@@ -237,11 +244,8 @@ impl Walk<'_> {
                     "a wildcard grant cannot be narrowed per principal",
                 );
             }
-            if a.relation.is_some() {
-                self.refuse(
-                    at.clone(),
-                    "a subject set (type#relation) cannot be narrowed without its members",
-                );
+            if let Some(r) = &a.relation {
+                self.subject_set(&at, &a.type_name, r);
             }
         }
         let kind = if ty == self.root {
@@ -255,6 +259,38 @@ impl Walk<'_> {
             kind,
             target_type: None,
             through: through.map(str::to_string),
+        });
+    }
+
+    /// `T#r` granted on a view relation: `r` must be a plain relation of object types on `T` (one level of groups).
+    fn subject_set(&mut self, at: &str, ty: &str, rel: &str) {
+        let Some(types) = self
+            .schema
+            .definitions
+            .get(ty)
+            .and_then(|d| d.relations.get(rel))
+            .cloned()
+        else {
+            self.refuse(
+                at.to_string(),
+                "a subject set must name a relation (not a permission) of a defined type",
+            );
+            return;
+        };
+        for a in &types {
+            if a.relation.is_some() || a.wildcard || a.caveat.is_some() || a.expiration {
+                self.refuse(
+                    format!("{ty}#{rel}"),
+                    "a subject set's members must be plain object types (no nested sets, wildcards or caveats)",
+                );
+            }
+        }
+        self.out.insert(ViewRelation {
+            resource_type: ty.to_string(),
+            relation: rel.to_string(),
+            kind: Kind::Set,
+            target_type: None,
+            through: None,
         });
     }
 

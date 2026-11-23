@@ -16,10 +16,13 @@ definition workspace {
   relation member: user
   relation admin: user
 }
+definition group {
+  relation member: user
+}
 definition container {
   relation workspace: workspace
   relation parent: container
-  relation member: user
+  relation member: user | group#member
   relation editor: user
   permission view = member + editor + workspace->admin + parent->view
 }
@@ -124,7 +127,7 @@ async fn the_daemon_end_to_end() {
     s.write_schema(SCHEMA, Duration::from_secs(5))
         .await
         .unwrap();
-    for ty in ["container", "workspace"] {
+    for ty in ["container", "workspace", "group"] {
         s.delete_all(ty, Duration::from_secs(5)).await.unwrap();
     }
     s.write(
@@ -146,6 +149,14 @@ async fn the_daemon_end_to_end() {
             op(true, "container:acme/other", "editor", "user:acme/bo"),
             // The same principal id in another tenant reads that tenant's containers only.
             op(true, "container:globex/g1", "member", "user:globex/ana"),
+            // A grant to a group, and one member of it.
+            op(
+                true,
+                "container:acme/team",
+                "member",
+                "group:acme/eng#member",
+            ),
+            op(true, "group:acme/eng", "member", "user:acme/dee"),
         ],
         Duration::from_secs(5),
     )
@@ -167,7 +178,10 @@ async fn the_daemon_end_to_end() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(n, 5, "member, editor, parent, workspace, workspace#admin");
+    assert_eq!(
+        n, 6,
+        "member, editor, parent, workspace, workspace#admin, group#member"
+    );
     sql(
         &ctx,
         "delete from fence.view_relation where relation = 'editor'",
@@ -186,6 +200,27 @@ async fn the_daemon_end_to_end() {
     assert_eq!(set_of(&ctx, "acme", "ana").await, vec!["file", "space"]);
     assert_eq!(set_of(&ctx, "acme", "adm").await, vec!["w1doc"]);
     assert_eq!(set_of(&ctx, "acme", "bo").await, vec!["other"]);
+    assert_eq!(
+        set_of(&ctx, "acme", "dee").await,
+        vec!["team"],
+        "read through a group"
+    );
+    let set_grants: i64 = ctx
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select count(*) from fence.set_grant where tenant = 'acme'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        set_grants, 1,
+        "the grant to the group is mirrored by backfill"
+    );
     backfill::backfill(&ctx, "globex").await.unwrap();
     assert_eq!(
         set_of(&ctx, "globex", "ana").await,
@@ -256,6 +291,28 @@ async fn the_daemon_end_to_end() {
     loops::refresh_pass(&ctx, 2).await.unwrap(); // bo refreshed
     assert_eq!(set_of(&ctx, "acme", "bo").await, vec!["file2", "other"]);
 
+    // SUBJECT SETS: a new member reads what the group was granted after delivery; removed, it is gone at commit.
+    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('touch', 'group:acme/eng', 'member', 'user:acme/eve')").await;
+    relay::relay_once(&ctx).await.unwrap();
+    loops::refresh_pass(&ctx, 2).await.unwrap();
+    assert_eq!(set_of(&ctx, "acme", "eve").await, vec!["team"]);
+    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('delete', 'group:acme/eng', 'member', 'user:acme/dee')").await;
+    assert!(
+        set_of(&ctx, "acme", "dee").await.is_empty(),
+        "a membership removed narrows at commit"
+    );
+    project::refresh_one(&ctx, "acme", "dee", None, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(
+        set_of(&ctx, "acme", "dee").await.is_empty(),
+        "and no refresh regrows it while pending"
+    );
+    relay::relay_once(&ctx).await.unwrap();
+    loops::refresh_pass(&ctx, 2).await.unwrap();
+    assert!(set_of(&ctx, "acme", "dee").await.is_empty());
+    assert_eq!(set_of(&ctx, "acme", "eve").await, vec!["team"]);
+
     // The workspace admin revoked: narrowed through the edge at commit.
     sql(&ctx, "set fence.tenant = 'acme'; select fence.write('delete', 'workspace:acme/w1', 'admin', 'user:acme/adm')").await;
     assert!(set_of(&ctx, "acme", "adm").await.is_empty());
@@ -316,7 +373,7 @@ async fn the_daemon_end_to_end() {
         .unwrap();
     loops::refresh_pass(&ctx, 2).await.unwrap();
     let before = set_of(&ctx, "acme", "cy").await;
-    for p in ["ana", "adm", "bo", "cy"] {
+    for p in ["ana", "adm", "bo", "cy", "dee", "eve"] {
         project::refresh_one(&shadow, "acme", p, None, Duration::from_secs(2))
             .await
             .unwrap();

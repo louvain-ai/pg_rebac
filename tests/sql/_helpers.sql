@@ -55,3 +55,10 @@ language sql as $$
   insert into fence.watch_state (scope, heartbeat_at) values ('*', clock_timestamp())
   on conflict (scope) do update set heartbeat_at = clock_timestamp()
 $$;
+
+-- The same shape with subject sets: container#member also accepts group#member.
+create or replace function t.fixture_relations_with_sets() returns void
+language sql as $$
+  select t.fixture_relations();
+  insert into fence.view_relation (resource_type, relation, kind) values ('group', 'member', 'set');
+$$;

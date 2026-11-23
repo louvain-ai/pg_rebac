@@ -30,6 +30,7 @@ pub async fn stored(
             kind: match r.get::<_, &str>(2) {
                 "direct" => fence_schema::Kind::Direct,
                 "arrow" => fence_schema::Kind::Arrow,
+                "set" => fence_schema::Kind::Set,
                 _ => fence_schema::Kind::Via,
             },
             target_type: r.get(3),

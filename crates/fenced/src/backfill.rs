@@ -68,6 +68,20 @@ pub async fn backfill(ctx: &Ctx, tenant: &str) -> anyhow::Result<Backfilled> {
                         &[&tenant, &child, &rel.relation, &format!("{}:{parent}", sobj.object_type)],
                     )
                     .await? as usize;
+            } else if *ty == ctx.projection.resource_type && !sub.optional_relation.is_empty() {
+                // A grant to a subject set: mirrored, so a membership's removal narrows without SpiceDB.
+                let (Some(container), Some(set_id)) = (
+                    crate::db::strip(&prefix, &res.object_id),
+                    crate::db::strip(&prefix, &sobj.object_id),
+                ) else {
+                    continue;
+                };
+                db.execute(
+                    "insert into fence.set_grant (tenant, container, relation, subject_set) values ($1, $2, $3, $4)
+                     on conflict do nothing",
+                    &[&tenant, &container, &rel.relation, &format!("{}:{set_id}#{}", sobj.object_type, sub.optional_relation)],
+                )
+                .await?;
             } else if sobj.object_type == ctx.projection.subject_type
                 && sub.optional_relation.is_empty()
             {

@@ -96,11 +96,12 @@ create index if not exists subject_by_subject_idx on fence.subject (tenant, subj
 -- The relations that can change the projected permission, derived from the SpiceDB schema by the daemon and checked
 -- against it at start. kind: 'direct' (a relation on the resource type that grants it), 'arrow' (a relation on the
 -- resource type the permission walks through; its tuples are mirrored into fence.edge), 'via' (a relation on an
--- arrowed type that grants it there; `through` names the arrow).
+-- arrowed type that grants it there; `through` names the arrow), 'set' (a relation whose tuples are memberships of
+-- a subject set, `group#member`, that a direct relation grants to).
 create table if not exists fence.view_relation (
   resource_type text not null,
   relation      text not null,
-  kind          text not null check (kind in ('direct', 'arrow', 'via')),
+  kind          text not null check (kind in ('direct', 'arrow', 'via', 'set')),
   target_type   text,          -- arrow: the type it points at
   through       text,          -- via: the arrow on the projected type that reaches this relation
   primary key (resource_type, relation)
@@ -115,6 +116,21 @@ create table if not exists fence.edge (
   primary key (tenant, child, relation, parent)
 );
 create index if not exists edge_parent_idx on fence.edge (tenant, parent, relation);
+alter table fence.view_relation drop constraint if exists view_relation_kind_check;
+alter table fence.view_relation add constraint view_relation_kind_check check (kind in ('direct', 'arrow', 'via', 'set'));
+
+-- Local copy of grants to a SUBJECT SET (container#member@group:eng#member), so a membership's removal narrows with
+-- SpiceDB and the daemon down: everyone it named loses what the set was granted.
+create table if not exists fence.set_grant (
+  tenant      text not null,
+  container   text not null,   -- stripped id of the projected type
+  relation    text not null,
+  subject_set text not null,   -- typed, stripped, with its relation: 'group:eng#member'
+  primary key (tenant, container, relation, subject_set)
+);
+create index if not exists set_grant_set_idx on fence.set_grant (tenant, subject_set);
+
+
 
 -- The outbox: relationship writes made through fence.write, in the order they must reach SpiceDB.
 create table if not exists fence.outbox (
@@ -197,6 +213,13 @@ create or replace function fence.obj_type(ref text) returns text
 language sql immutable parallel safe as $$ select split_part(ref, ':', 1) $$;
 create or replace function fence.obj_id(ref text) returns text
 language sql immutable parallel safe as $$ select substr(ref, strpos(ref, ':') + 1) $$;
+
+-- 'group:acme/eng#member' as the set_grant table spells it in tenant t: 'group:eng#member'.
+create or replace function fence.set_ref(t text, ref text) returns text
+language sql stable parallel safe as $$
+  select fence.obj_type(ref) || ':' || fence.strip(t, split_part(fence.obj_id(ref), '#', 1))
+         || '#' || split_part(ref, '#', 2)
+$$;
 
 -- The SpiceDB subjects a principal reads as. A retired principal reads as nothing.
 create or replace function fence.subjects_of(t text, p text) returns setof text
@@ -351,10 +374,19 @@ language sql stable as $$
       and e.parent = fence.obj_type(d.resource) || ':' || fence.strip(t, fence.obj_id(d.resource))
     where d.subject in (select s from subj)
     union
-    -- an arrow tuple being removed holds its child for everyone until it is delivered
+    -- an arrow tuple, or a grant to a subject set, being removed holds its container for everyone until delivered
     select fence.strip(t, fence.obj_id(d.resource))
     from deleted d join fence.view_relation v
-      on v.kind = 'arrow' and v.relation = d.relation and v.resource_type = fence.obj_type(d.resource)
+      on v.relation = d.relation and v.resource_type = fence.obj_type(d.resource)
+     and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
+    union
+    -- a membership of a subject set: whatever the set was granted
+    select g.container
+    from deleted d join fence.view_relation v
+      on v.kind = 'set' and v.relation = d.relation and v.resource_type = fence.obj_type(d.resource)
+    join fence.set_grant g on g.tenant = t
+      and g.subject_set = fence.obj_type(d.resource) || ':' || fence.strip(t, fence.obj_id(d.resource)) || '#' || d.relation
+    where d.subject in (select s from subj)
   ),
   closure as (  -- and everything under those through self-arrows (a space's shared files)
     select c from seed where c is not null
@@ -474,8 +506,9 @@ begin
   if op not in ('touch', 'delete') then
     raise exception 'fence.write: op must be touch or delete' using errcode = 'FN422';
   end if;
-  if strpos(resource, ':') = 0 or strpos(subject, ':') = 0 or relation = '' then
-    raise exception 'fence.write: references are type:id' using errcode = 'FN422';
+  if strpos(resource, ':') = 0 or strpos(subject, ':') = 0 or relation = '' or strpos(resource, '#') > 0 then
+    raise exception 'fence.write: references are type:id (a subject may add #relation, a resource may not)'
+      using errcode = 'FN422';
   end if;
   if fence.strip(t, fence.obj_id(resource)) is null
      or fence.strip(t, split_part(fence.obj_id(subject), '#', 1)) is null then
@@ -494,6 +527,13 @@ begin
       on conflict do nothing;
     end if;
     -- A delete keeps the edge until commit-time narrowing has used it; narrow_pending removes it.
+  end if;
+  if op = 'touch' and strpos(subject, '#') > 0 and fence.obj_type(resource) = fence.setting('resource_type')
+     and exists (select 1 from fence.view_relation vr where vr.resource_type = fence.obj_type(resource)
+                   and vr.relation = write.relation and vr.kind = 'direct') then
+    insert into fence.set_grant (tenant, container, relation, subject_set)
+    values (t, fence.strip(t, fence.obj_id(resource)), write.relation, fence.set_ref(t, subject))
+    on conflict do nothing;
   end if;
   return new_seq;
 end $$;
@@ -545,11 +585,19 @@ begin
     join fence.edge e on e.tenant = d.tenant and e.relation = v.through
       and e.parent = fence.obj_type(d.resource) || ':' || fence.strip(d.tenant, fence.obj_id(d.resource))
   ),
-  arrow as (  -- an arrow removed: everyone who holds its child loses it
+  arrow as (  -- an arrow, or a grant to a subject set, removed: everyone who holds the container loses it
     select d.tenant, fence.strip(d.tenant, fence.obj_id(d.resource)) as container
     from del d join fence.view_relation v
-      on v.kind = 'arrow' and v.resource_type = fence.obj_type(d.resource) and v.relation = d.relation
+      on v.resource_type = fence.obj_type(d.resource) and v.relation = d.relation
+     and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
     where v.resource_type = root
+  ),
+  membership as (  -- a member leaves a subject set: they lose what the set was granted
+    select d.tenant, d.subject, g.container
+    from del d join fence.view_relation v
+      on v.kind = 'set' and v.resource_type = fence.obj_type(d.resource) and v.relation = d.relation
+    join fence.set_grant g on g.tenant = d.tenant
+      and g.subject_set = fence.obj_type(d.resource) || ':' || fence.strip(d.tenant, fence.obj_id(d.resource)) || '#' || d.relation
   )
   insert into fence_narrow_pairs (tenant, principal, container)
   select x.tenant, p, fence.strip(x.tenant, fence.obj_id(x.resource))
@@ -557,6 +605,9 @@ begin
   union
   select x.tenant, p, x.container
   from via x cross join lateral fence.principals_of(x.tenant, x.subject) p
+  union
+  select x.tenant, p, x.container
+  from membership x cross join lateral fence.principals_of(x.tenant, x.subject) p
   union
   select r.tenant, r.principal, r.container
   from arrow a join fence.readable r on r.tenant = a.tenant and r.container = a.container;
@@ -582,6 +633,15 @@ begin
   where n.op = 'delete' and e.tenant = n.tenant and e.relation = n.relation
     and e.child = fence.strip(n.tenant, fence.obj_id(n.resource))
     and e.parent = fence.obj_type(n.subject) || ':' || fence.strip(n.tenant, fence.obj_id(n.subject));
+
+  -- Removed grants to a subject set leave the set_grant table likewise.
+  delete from fence.set_grant g using (
+    select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
+    from fence.outbox where seq = any(seqs)
+    order by resource, relation, subject, seq desc
+  ) n
+  where n.op = 'delete' and strpos(n.subject, '#') > 0 and g.tenant = n.tenant and g.relation = n.relation
+    and g.container = fence.strip(n.tenant, fence.obj_id(n.resource)) and g.subject_set = fence.set_ref(n.tenant, n.subject);
 
   if not exists (select 1 from fence_narrow_pairs) then return 0; end if;
 
@@ -805,7 +865,7 @@ begin
   with rows as (
     select o.tenant, o.op, o.subject
     from fence.outbox o join fence.view_relation v
-      on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation and v.kind in ('direct', 'via')
+      on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation and v.kind in ('direct', 'via', 'set')
     where o.seq = any(delivered)
   ), targets as (
     select distinct r.tenant, p.principal, min(case when r.op = 'delete' then 0 else 1 end)::smallint as pri
@@ -815,11 +875,12 @@ begin
   select count(*) into n from targets t, lateral (select fence.enqueue_refresh(t.tenant, t.principal, t.pri, token)) x;
   queued := queued + n;
 
-  -- Arrow tuples name no reader: queue their resource for a LookupSubjects.
+  -- Arrow tuples and grants to a subject set name no reader: queue their resource for a LookupSubjects.
   insert into fence.refresh_resource (tenant, resource, zedtoken, due_at, generation)
   select distinct o.tenant, o.resource, token, now(), 1
   from fence.outbox o join fence.view_relation v
-    on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation and v.kind = 'arrow'
+    on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation
+   and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(o.subject, '#') > 0))
   where o.seq = any(delivered)
   on conflict (tenant, resource) do update
     set zedtoken = excluded.zedtoken, due_at = least(fence.refresh_resource.due_at, now()),

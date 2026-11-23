@@ -128,9 +128,14 @@ fn refuses_caveats_expiry_wildcards_and_subject_sets() {
         "wildcard",
     );
     refused(
-        "definition user {} definition group { relation member: user } \
+        "definition user {} definition group { relation member: user | group#member } \
          definition doc { relation reader: group#member permission view = reader }",
-        "subject set",
+        "nested sets",
+    );
+    refused(
+        "definition user {} definition group { relation m: user permission member = m } \
+         definition doc { relation reader: group#member permission view = reader }",
+        "not a permission",
     );
 }
 
@@ -172,4 +177,19 @@ fn parses_namespaced_types_and_parentheses() {
     )
     .unwrap();
     assert_eq!(closure(&s, "acme/doc", "view").unwrap().len(), 2);
+}
+
+#[test]
+fn accepts_one_level_of_subject_sets() {
+    let s = parse(
+        "definition user {} definition org { relation member: user } definition group { relation member: user } \
+         definition doc { relation reader: user | org#member | group#member relation owner: user | group#member \
+         permission view = reader + owner }",
+    )
+    .unwrap();
+    let got = closure(&s, "doc", "view").unwrap();
+    assert!(got.contains(&rel("org", "member", Kind::Set, None, None)));
+    assert!(got.contains(&rel("group", "member", Kind::Set, None, None)));
+    assert!(got.contains(&rel("doc", "reader", Kind::Direct, None, None)));
+    assert_eq!(got.len(), 4);
 }
