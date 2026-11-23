@@ -1,0 +1,421 @@
+//! The daemon against a real SpiceDB and a real Postgres (`docker compose up -d --wait` at the repo root).
+//! Runs only with FENCE_IT=1, and says SKIPPED loudly otherwise: a fence test that silently passes is worse than none.
+
+use fenced::{
+    backfill, closure,
+    config::{Config, Mode},
+    loops, project, relay,
+    spicedb::{SpiceDb, TupleOp},
+    verify, Ctx,
+};
+use std::time::Duration;
+
+const SCHEMA: &str = r#"
+definition user {}
+definition workspace {
+  relation member: user
+  relation admin: user
+}
+definition container {
+  relation workspace: workspace
+  relation parent: container
+  relation member: user
+  relation editor: user
+  permission view = member + editor + workspace->admin + parent->view
+}
+"#;
+
+fn enabled() -> bool {
+    if std::env::var("FENCE_IT").as_deref() == Ok("1") {
+        return true;
+    }
+    eprintln!("!!!!!!!! SKIPPED: the fenced integration test needs FENCE_IT=1 and `docker compose up -d --wait`");
+    false
+}
+
+const PG: &str = "postgres://postgres:fence@127.0.0.1:55433";
+const KEY: &str = "fence-test-key";
+
+async fn fresh_db(name: &str) -> String {
+    let (admin, conn) = tokio_postgres::connect(&format!("{PG}/postgres"), tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    admin
+        .batch_execute(&format!("drop database if exists {name} with (force)"))
+        .await
+        .unwrap();
+    admin
+        .batch_execute(&format!("create database {name}"))
+        .await
+        .unwrap();
+    let url = format!("{PG}/{name}");
+    let (db, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let sql = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../sql/fence.sql"))
+        .unwrap();
+    db.batch_execute(&format!("set client_min_messages = warning; {sql}"))
+        .await
+        .unwrap();
+    url
+}
+
+fn config(url_env: &str, endpoint: &str, mode: Mode) -> Config {
+    Config {
+        database_url_env: url_env.into(),
+        spicedb_endpoint: endpoint.into(),
+        spicedb_token_env: "FENCE_IT_TOKEN".into(),
+        mode,
+        deadline_ms: 2_000,
+        read_deadline_ms: 2_000,
+        ..Config::default()
+    }
+}
+
+fn op(touch: bool, resource: &str, relation: &str, subject: &str) -> TupleOp {
+    TupleOp {
+        touch,
+        resource: resource.into(),
+        relation: relation.into(),
+        subject: subject.into(),
+    }
+}
+
+async fn set_of(ctx: &Ctx, tenant: &str, p: &str) -> Vec<String> {
+    let c = ctx.pool.get().await.unwrap();
+    c.query(
+        "select container from fence.readable where tenant = $1 and principal = $2 order by 1",
+        &[&tenant, &p],
+    )
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect()
+}
+
+async fn sql(ctx: &Ctx, q: &str) {
+    ctx.pool
+        .get()
+        .await
+        .unwrap()
+        .batch_execute(q)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_daemon_end_to_end() {
+    if !enabled() {
+        return;
+    }
+    std::env::set_var("FENCE_IT_TOKEN", KEY);
+    let url = fresh_db("fenced_it").await;
+    std::env::set_var("FENCE_IT_DB", &url);
+    let endpoint =
+        std::env::var("FENCE_IT_SPICEDB").unwrap_or_else(|_| "http://127.0.0.1:50061".into());
+
+    // A fresh SpiceDB: the schema, and relationships written by "someone else" before pg_fence existed.
+    let s = SpiceDb::connect(&endpoint, KEY, fenced::config::Consistency::FullyConsistent)
+        .await
+        .unwrap();
+    s.write_schema(SCHEMA, Duration::from_secs(5))
+        .await
+        .unwrap();
+    for ty in ["container", "workspace"] {
+        s.delete_all(ty, Duration::from_secs(5)).await.unwrap();
+    }
+    s.write(
+        &[
+            op(true, "container:acme/space", "member", "user:acme/ana"),
+            op(
+                true,
+                "container:acme/file",
+                "parent",
+                "container:acme/space",
+            ),
+            op(
+                true,
+                "container:acme/w1doc",
+                "workspace",
+                "workspace:acme/w1",
+            ),
+            op(true, "workspace:acme/w1", "admin", "user:acme/adm"),
+            op(true, "container:acme/other", "editor", "user:acme/bo"),
+            // The same principal id in another tenant reads that tenant's containers only.
+            op(true, "container:globex/g1", "member", "user:globex/ana"),
+        ],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+
+    let ctx = Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Live))
+        .await
+        .unwrap();
+
+    // CLOSURE: derived from the live schema at start, and a stored list that disagrees refuses the next start.
+    closure::check_at_start(&ctx, false).await.unwrap();
+    let n: i64 = ctx
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one("select count(*) from fence.view_relation", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 5, "member, editor, parent, workspace, workspace#admin");
+    sql(
+        &ctx,
+        "delete from fence.view_relation where relation = 'editor'",
+    )
+    .await;
+    assert!(
+        closure::check_at_start(&ctx, false).await.is_err(),
+        "a closure missing a view relation refuses the start"
+    );
+    closure::check_at_start(&ctx, true).await.unwrap();
+
+    // BACKFILL: edges mirrored, every named principal projected through arrows and the via relation.
+    let b = backfill::backfill(&ctx, "acme").await.unwrap();
+    assert_eq!(b.failed, 0);
+    assert!(b.edges >= 2, "parent and workspace edges mirrored: {b:?}");
+    assert_eq!(set_of(&ctx, "acme", "ana").await, vec!["file", "space"]);
+    assert_eq!(set_of(&ctx, "acme", "adm").await, vec!["w1doc"]);
+    assert_eq!(set_of(&ctx, "acme", "bo").await, vec!["other"]);
+    backfill::backfill(&ctx, "globex").await.unwrap();
+    assert_eq!(
+        set_of(&ctx, "globex", "ana").await,
+        vec!["g1"],
+        "tenants stay apart"
+    );
+    let d = verify::diff(&ctx, "acme", None, verify::Against::SpiceDb, "readable")
+        .await
+        .unwrap();
+    assert_eq!(
+        (d.extra_rows, d.missing_rows, d.unavailable),
+        (0, 0, 0),
+        "{d:?}"
+    );
+    let iso = verify::isolation(&ctx).await.unwrap();
+    assert_eq!(iso.extra_rows, 0);
+
+    // A GRANT through fence.write: relayed, then refreshed at least as fresh as its own write.
+    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('touch', 'container:acme/new', 'member', 'user:acme/ana')").await;
+    assert_eq!(relay::relay_once(&ctx).await.unwrap(), 1);
+    let tok: Option<String> = ctx
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select zedtoken from fence.refresh where tenant = 'acme' and principal = 'ana'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(tok.is_some(), "the refresh carries the delivery's zedtoken");
+    loops::refresh_pass(&ctx, 2).await.unwrap();
+    assert_eq!(
+        set_of(&ctx, "acme", "ana").await,
+        vec!["file", "new", "space"]
+    );
+
+    // A REVOCATION is in force at COMMIT, before the relay has run, and SpiceDB follows when it does.
+    sql(&ctx, "begin; set local fence.tenant = 'acme'; select fence.write('delete', 'container:acme/space', 'member', 'user:acme/ana'); commit").await;
+    assert_eq!(
+        set_of(&ctx, "acme", "ana").await,
+        vec!["new"],
+        "the space and its file are gone at commit"
+    );
+    // A refresh before delivery cannot restore it: the pending delete is subtracted.
+    project::refresh_one(&ctx, "acme", "ana", None, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        set_of(&ctx, "acme", "ana").await,
+        vec!["new"],
+        "no regrowth from a pending revocation"
+    );
+    relay::relay_once(&ctx).await.unwrap();
+    loops::refresh_pass(&ctx, 2).await.unwrap();
+    assert_eq!(set_of(&ctx, "acme", "ana").await, vec!["new"]);
+    let d = verify::diff(&ctx, "acme", None, verify::Against::SpiceDb, "readable")
+        .await
+        .unwrap();
+    assert_eq!(d.extra_rows, 0, "{d:?}");
+
+    // An arrow touch names no reader: LookupSubjects finds who can now see the file.
+    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('touch', 'container:acme/file2', 'parent', 'container:acme/other')").await;
+    relay::relay_once(&ctx).await.unwrap();
+    loops::refresh_pass(&ctx, 2).await.unwrap(); // the resource queue: LookupSubjects, enqueue bo
+    loops::refresh_pass(&ctx, 2).await.unwrap(); // bo refreshed
+    assert_eq!(set_of(&ctx, "acme", "bo").await, vec!["file2", "other"]);
+
+    // The workspace admin revoked: narrowed through the edge at commit.
+    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('delete', 'workspace:acme/w1', 'admin', 'user:acme/adm')").await;
+    assert!(set_of(&ctx, "acme", "adm").await.is_empty());
+    relay::relay_once(&ctx).await.unwrap();
+
+    // SPICEDB DOWN: a revocation is still in force at commit; the relay fails and marks nothing delivered.
+    let down = Ctx::connect(config("FENCE_IT_DB", "http://127.0.0.1:1", Mode::Live))
+        .await
+        .unwrap();
+    sql(&down, "set fence.tenant = 'acme'; select fence.write('delete', 'container:acme/other', 'editor', 'user:acme/bo')").await;
+    assert!(
+        set_of(&down, "acme", "bo").await.is_empty(),
+        "narrowed with SpiceDB unreachable"
+    );
+    assert!(relay::relay_once(&down).await.is_err());
+    let unsynced: i64 = down
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select count(*) from fence.outbox where synced_at is null",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(unsynced, 1, "an outage marks nothing delivered");
+    // A first read with SpiceDB down is unavailable, never empty.
+    assert!(
+        project::refresh_one(&down, "acme", "newcomer", None, Duration::from_millis(300))
+            .await
+            .is_err()
+    );
+    drop(down);
+    relay::relay_once(&ctx).await.unwrap();
+
+    // A QUARANTINED row: SpiceDB refuses it on its own; the rest of the batch is delivered.
+    sql(
+        &ctx,
+        "set fence.tenant = 'acme';
+               select fence.write('touch', 'container:acme/fine', 'member', 'user:acme/cy');
+               select fence.write('touch', 'container:acme/bad', 'nosuchrelation', 'user:acme/cy')",
+    )
+    .await;
+    relay::relay_once(&ctx).await.unwrap();
+    let (quarantined, unsynced): (i64, i64) = {
+        let r = ctx.pool.get().await.unwrap()
+            .query_one("select count(*) filter (where error is not null), count(*) filter (where synced_at is null) from fence.outbox", &[])
+            .await.unwrap();
+        (r.get(0), r.get(1))
+    };
+    assert_eq!((quarantined, unsynced), (1, 0));
+
+    // SHADOW: a shadow daemon writes only readable_shadow, and the compare is clean.
+    let shadow = Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Shadow))
+        .await
+        .unwrap();
+    loops::refresh_pass(&ctx, 2).await.unwrap();
+    let before = set_of(&ctx, "acme", "cy").await;
+    for p in ["ana", "adm", "bo", "cy"] {
+        project::refresh_one(&shadow, "acme", p, None, Duration::from_secs(2))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        set_of(&ctx, "acme", "cy").await,
+        before,
+        "shadow leaves the live projection alone"
+    );
+    let d = verify::diff(&shadow, "acme", None, verify::Against::Shadow, "readable")
+        .await
+        .unwrap();
+    assert_eq!((d.extra_rows, d.missing_rows), (0, 0), "{d:?}");
+
+    // HEARTBEAT: beaten while SpiceDB answers; reads are fresh, and back-dated past 5 s they fail closed.
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let hb = tokio::spawn(loops::heartbeat_loop(
+        std::sync::Arc::new(
+            Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Live))
+                .await
+                .unwrap(),
+        ),
+        stop.clone(),
+    ));
+    let mut fresh = false;
+    for _ in 0..50 {
+        let n: i64 = ctx.pool.get().await.unwrap()
+            .query_one("select count(*) from fence.watch_state where scope = '*' and heartbeat_at > now() - interval '3 seconds'", &[])
+            .await.unwrap().get(0);
+        if n == 1 {
+            fresh = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(fresh, "the daemon beats the heartbeat");
+    stop_tx.send(true).unwrap();
+    hb.await.unwrap();
+    {
+        let c = ctx.pool.get().await.unwrap();
+        c.batch_execute("set fence.tenant = 'acme'").await.unwrap();
+        assert!(c
+            .query("select * from fence.readable_set('ana')", &[])
+            .await
+            .is_ok());
+        c.batch_execute("update fence.watch_state set heartbeat_at = now() - interval '6 seconds'")
+            .await
+            .unwrap();
+        let err = c
+            .query("select * from fence.readable_set('ana')", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("FN503"));
+    }
+
+    // WATCH, observe-only: a write made straight to SpiceDB (not through fence.write) is counted as external.
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let w = tokio::spawn(loops::watch_loop(
+        std::sync::Arc::new(
+            Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Live))
+                .await
+                .unwrap(),
+        ),
+        stop,
+    ));
+    let mut counted = false;
+    for i in 0..100 {
+        if i % 10 == 0 {
+            s.write(
+                &[op(
+                    true,
+                    "container:acme/elsewhere",
+                    "member",
+                    &format!("user:acme/ext{i}"),
+                )],
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        }
+        let n: Option<i64> = ctx
+            .pool
+            .get()
+            .await
+            .unwrap()
+            .query_opt(
+                "select external_writes from fence.watch_state where scope = 'watch'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .map(|r| r.get(0));
+        if n.unwrap_or(0) > 0 {
+            counted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop_tx.send(true).unwrap();
+    w.await.unwrap();
+    assert!(counted, "an external write is counted on Watch");
+}
