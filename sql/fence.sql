@@ -750,7 +750,7 @@ returns void
 language plpgsql volatile as $$
 declare owner_name name;
 begin
-  select pg_get_userbyid(relowner) into owner_name from pg_class where oid = tbl;
+  select pg_get_userbyid(relowner) into owner_name from pg_class where oid = tbl::regclass;
   if owner_name = current_user and not force then
     raise exception 'fence.enable_rls: % is owned by %, which bypasses row-level security', tbl, owner_name
       using errcode = 'FN422', hint = 'pass force => true to add FORCE ROW LEVEL SECURITY';
