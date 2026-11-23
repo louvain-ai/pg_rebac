@@ -305,11 +305,12 @@ begin
   return exists (select 1 from fence.readable r where r.tenant = fence.tenant() and r.principal = p and r.container = c);
 end $$;
 
--- How many containers a principal reads, and the tenant's distinct total: for choosing the exact or the ANN path.
-create or replace function fence.breadth(p text) returns table (containers bigint, tenant_containers bigint)
+-- How many containers a principal reads (checked like a read), for choosing the exact path or the ANN path: below
+-- a few thousand candidate rows the exact path is both faster and complete (docs/planner.md).
+create or replace function fence.breadth(p text) returns integer
 language sql stable as $$
-  select (select count(*) from fence.readable_set(p)),
-         (select count(distinct container) from fence.readable where tenant = fence.tenant())
+  select case when fence.checked(p) then
+    (select n_containers from fence.principal_state where tenant = fence.tenant() and principal = p) else 0 end
 $$;
 
 -- The set's version, for caches keyed on it.
