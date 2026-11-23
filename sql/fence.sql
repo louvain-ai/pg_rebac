@@ -498,31 +498,27 @@ begin
   return new_seq;
 end $$;
 
--- Narrow every revocation THIS transaction queued (net per relationship, latest seq wins), once, under the affected
--- principals' locks taken in sorted order. Returns the number of projection rows removed. Called by the deferred
--- trigger at commit; calling it earlier is allowed and the trigger then skips what is done.
-create or replace function fence.narrow_pending() returns integer
+-- Narrow every revocation among these outbox rows (net per relationship, latest seq wins), under the affected
+-- principals' locks taken in sorted order. Returns the number of projection rows removed. The commit trigger calls it
+-- with this transaction's rows; the relay calls it again with the rows it claims, which is a no-op when the writing
+-- transaction already narrowed, and the safety net when it did not.
+create or replace function fence.narrow_seqs(seqs bigint[]) returns integer
 language plpgsql volatile as $$
 declare
-  me xid8 := pg_current_xact_id();
-  upto bigint := coalesce(nullif(current_setting('fence._narrowed_upto', true), ''), '0')::bigint;
-  top bigint;
   removed integer := 0;
   rec_p record;
   rec_h record;
   root text := fence.setting('resource_type');
   prior text := current_setting('lock_timeout');
 begin
-  select max(seq) into top from fence.outbox where committed_xid = me;
-  if top is null or top <= upto then return 0; end if;
-
+  if seqs is null or cardinality(seqs) = 0 then return 0; end if;
   create temp table if not exists fence_narrow_pairs (tenant text, principal text, container text)
     on commit drop;
   truncate fence_narrow_pairs;
 
   with net as (
     select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
-    from fence.outbox where committed_xid = me and seq > upto
+    from fence.outbox where seq = any(seqs)
     order by resource, relation, subject, seq desc
   ),
   del as (select * from net where op = 'delete'),
@@ -580,14 +576,13 @@ begin
   -- Removed arrows leave the edge table now that narrowing has used them.
   delete from fence.edge e using (
     select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
-    from fence.outbox where committed_xid = me and seq > upto
+    from fence.outbox where seq = any(seqs)
     order by resource, relation, subject, seq desc
   ) n
   where n.op = 'delete' and e.tenant = n.tenant and e.relation = n.relation
     and e.child = fence.strip(n.tenant, fence.obj_id(n.resource))
     and e.parent = fence.obj_type(n.subject) || ':' || fence.strip(n.tenant, fence.obj_id(n.subject));
 
-  perform set_config('fence._narrowed_upto', top::text, true);
   if not exists (select 1 from fence_narrow_pairs) then return 0; end if;
 
   -- A lookup that began before this revocation may be in flight under the principal's lock: wait for it, so it
@@ -621,6 +616,21 @@ begin
   end loop;
   perform pg_notify('fence_narrowed', '');
   return removed;
+end $$;
+
+-- Narrow every revocation THIS transaction queued, once. Called by the deferred trigger at commit; calling it earlier
+-- is allowed, and the trigger then skips what is done.
+create or replace function fence.narrow_pending() returns integer
+language plpgsql volatile as $$
+declare
+  upto bigint := coalesce(nullif(current_setting('fence._narrowed_upto', true), ''), '0')::bigint;
+  seqs bigint[];
+begin
+  select array_agg(seq order by seq) into seqs
+  from fence.outbox where committed_xid = pg_current_xact_id() and seq > upto;
+  if seqs is null then return 0; end if;
+  perform set_config('fence._narrowed_upto', seqs[cardinality(seqs)]::text, true);
+  return fence.narrow_seqs(seqs);
 end $$;
 
 create or replace function fence.narrow_trigger() returns trigger
@@ -692,3 +702,232 @@ begin
     'create policy fence_read on %s for select using (%I in (select * from fence.readable_set(current_setting(%L))))',
     tbl, container_column, principal_setting);
 end $$;
+
+-- -------------------------------------------------------------------------------------------------------------------
+-- The daemon's queues. Every daemon step is a SQL function, so its semantics are tested here and the daemon only
+-- moves data between these functions and SpiceDB.
+-- -------------------------------------------------------------------------------------------------------------------
+
+alter table fence.refresh add column if not exists generation bigint not null default 0;
+
+-- Resources whose readers a delivered arrow tuple may have changed (a file hung under a space, a container moved to
+-- a workspace). The daemon asks SpiceDB who can now view each one (LookupSubjects) and refreshes them.
+create table if not exists fence.refresh_resource (
+  tenant      text not null,
+  resource    text not null,   -- a full SpiceDB reference, 'container:acme/file-1'
+  zedtoken    text,
+  due_at      timestamptz not null default now(),
+  attempts    integer not null default 0,
+  leased_until timestamptz,
+  generation  bigint not null default 0,
+  primary key (tenant, resource)
+);
+
+-- One sweep per interval for the whole deployment, whichever replica claims it.
+create table if not exists fence.sweep_claim (
+  id      boolean primary key default true check (id),
+  last_at timestamptz not null
+);
+
+create or replace function fence.enqueue_refresh(t text, p text, pri smallint, token text) returns void
+language sql volatile as $$
+  insert into fence.refresh (tenant, principal, priority, zedtoken, due_at, generation)
+  values (t, p, pri, token, now(), 1)
+  on conflict (tenant, principal) do update
+    set priority = least(fence.refresh.priority, excluded.priority),
+        zedtoken = coalesce(excluded.zedtoken, fence.refresh.zedtoken),
+        due_at = least(fence.refresh.due_at, now()),
+        generation = fence.refresh.generation + 1
+$$;
+
+-- CLAIM A RELAY PASS: per tenant, revocations first, commit order within each, at most `per_tenant` from any one,
+-- and never a row whose relationship has an earlier row still undelivered, so no two relays reorder one
+-- relationship. The tenant walk is a loose index scan (one probe per tenant with pending work), and each tenant
+-- offers only its oldest `win` rows, so a flood in one tenant costs the others nothing.
+create or replace function fence.claim_relay(lim integer, per_tenant integer, win integer)
+returns table (seq bigint, tenant text, op text, resource text, relation text, subject text)
+language plpgsql volatile as $$
+begin
+  return query
+  with candidates as (
+    with recursive tenants(t) as (
+      (select o.tenant from fence.outbox o where o.synced_at is null order by o.tenant limit 1)
+      union all
+      select (select o.tenant from fence.outbox o where o.synced_at is null and o.tenant > tenants.t
+              order by o.tenant limit 1)
+      from tenants where tenants.t is not null
+    )
+    select c.seq, c.revoke_last, c.rank
+    from tenants cross join lateral (
+      select e.seq, e.revoke_last, row_number() over (order by e.revoke_last, e.seq) as rank
+      from (
+        select w.seq, (w.op <> 'delete') as revoke_last
+        from (select o.seq, o.op, o.resource, o.relation, o.subject from fence.outbox o
+              where o.tenant = tenants.t and o.synced_at is null order by o.seq limit win) w
+        where not exists (select 1 from fence.outbox p
+                          where p.resource = w.resource and p.relation = w.relation and p.subject = w.subject
+                            and p.seq < w.seq and p.synced_at is null)
+        order by (w.op <> 'delete'), w.seq
+        limit per_tenant
+      ) e
+    ) c
+    where tenants.t is not null
+    order by c.revoke_last, c.rank, c.seq
+    limit lim
+  ), locked as (
+    -- Locked here and re-checked under the lock: another relay may have claimed or delivered a candidate since.
+    select o.seq, o.tenant, o.op, o.resource, o.relation, o.subject
+    from fence.outbox o
+    where o.seq in (select candidates.seq from candidates) and o.synced_at is null
+      and not exists (select 1 from fence.outbox p
+                      where p.resource = o.resource and p.relation = o.relation and p.subject = o.subject
+                        and p.seq < o.seq and p.synced_at is null)
+    for update of o skip locked
+  )
+  select l.seq, l.tenant, l.op, l.resource, l.relation, l.subject
+  from locked l join candidates c on c.seq = l.seq
+  order by c.revoke_last, c.rank, c.seq;
+end $$;
+
+-- Record a delivery: rows delivered (with the token SpiceDB wrote them at), rows SpiceDB refused on their own
+-- (quarantined: kept, with the reason, never deleted), and the refreshes the delivered rows require, all in the
+-- caller's transaction, so a delivery recorded is a refresh recorded.
+create or replace function fence.record_delivery(delivered bigint[], token text, refused bigint[], reasons text[])
+returns integer
+language plpgsql volatile as $$
+declare queued integer := 0; n integer;
+begin
+  update fence.outbox set synced_at = now(), zedtoken = token where seq = any(delivered);
+  update fence.outbox o set synced_at = now(), error = r.reason
+  from unnest(refused, reasons) as r(seq, reason) where o.seq = r.seq;
+
+  -- Direct and via relations name their subject: refresh the principals it stands for. A revocation first.
+  with rows as (
+    select o.tenant, o.op, o.subject
+    from fence.outbox o join fence.view_relation v
+      on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation and v.kind in ('direct', 'via')
+    where o.seq = any(delivered)
+  ), targets as (
+    select distinct r.tenant, p.principal, min(case when r.op = 'delete' then 0 else 1 end)::smallint as pri
+    from rows r cross join lateral fence.principals_of(r.tenant, r.subject) as p(principal)
+    group by r.tenant, p.principal
+  )
+  select count(*) into n from targets t, lateral (select fence.enqueue_refresh(t.tenant, t.principal, t.pri, token)) x;
+  queued := queued + n;
+
+  -- Arrow tuples name no reader: queue their resource for a LookupSubjects.
+  insert into fence.refresh_resource (tenant, resource, zedtoken, due_at, generation)
+  select distinct o.tenant, o.resource, token, now(), 1
+  from fence.outbox o join fence.view_relation v
+    on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation and v.kind = 'arrow'
+  where o.seq = any(delivered)
+  on conflict (tenant, resource) do update
+    set zedtoken = excluded.zedtoken, due_at = least(fence.refresh_resource.due_at, now()),
+        generation = fence.refresh_resource.generation + 1;
+  get diagnostics n = row_count;
+  return queued + n;
+end $$;
+
+-- Claim due refreshes under a lease; a lease that runs out is claimable again (a daemon that died mid-refresh).
+create or replace function fence.claim_refresh(lim integer, lease_ms integer)
+returns table (tenant text, principal text, zedtoken text, attempts integer, generation bigint)
+language sql volatile as $$
+  update fence.refresh r set leased_until = now() + lease_ms * interval '1 millisecond'
+  from (select x.tenant, x.principal from fence.refresh x
+        where x.due_at <= now() and (x.leased_until is null or x.leased_until < now())
+        order by x.priority, x.due_at limit lim for update skip locked) c
+  where r.tenant = c.tenant and r.principal = c.principal
+  returning r.tenant, r.principal, r.zedtoken, r.attempts, r.generation
+$$;
+
+-- Done: removed, unless it was enqueued again while it ran (then it stays, due now).
+create or replace function fence.complete_refresh(t text, p text, gen bigint) returns void
+language sql volatile as $$
+  delete from fence.refresh where tenant = t and principal = p and generation = gen;
+  update fence.refresh set leased_until = null where tenant = t and principal = p
+$$;
+
+-- Failed: retried on a doubling ladder, capped at five minutes.
+create or replace function fence.fail_refresh(t text, p text, err text) returns void
+language sql volatile as $$
+  update fence.refresh set attempts = attempts + 1, leased_until = null, last_error = left(err, 500),
+    due_at = now() + least(power(2, least(attempts, 12)) * interval '1 second', interval '5 minutes')
+  where tenant = t and principal = p
+$$;
+
+create or replace function fence.claim_refresh_resource(lim integer, lease_ms integer)
+returns table (tenant text, resource text, zedtoken text, generation bigint)
+language sql volatile as $$
+  update fence.refresh_resource r set leased_until = now() + lease_ms * interval '1 millisecond'
+  from (select x.tenant, x.resource from fence.refresh_resource x
+        where x.due_at <= now() and (x.leased_until is null or x.leased_until < now())
+        order by x.due_at limit lim for update skip locked) c
+  where r.tenant = c.tenant and r.resource = c.resource
+  returning r.tenant, r.resource, r.zedtoken, r.generation
+$$;
+
+-- The subjects SpiceDB says can view a resource now: refresh the principals they stand for, and the resource is done.
+create or replace function fence.complete_refresh_resource(t text, res text, gen bigint, subjects text[], token text)
+returns integer
+language plpgsql volatile as $$
+declare n integer;
+begin
+  select count(*) into n from (
+    select distinct p.principal from unnest(subjects) s cross join lateral fence.principals_of(t, s) as p(principal)
+  ) x, lateral (select fence.enqueue_refresh(t, x.principal, 1::smallint, token)) y;
+  delete from fence.refresh_resource where tenant = t and resource = res and generation = gen;
+  update fence.refresh_resource set leased_until = null where tenant = t and resource = res;
+  return n;
+end $$;
+
+create or replace function fence.fail_refresh_resource(t text, res text) returns void
+language sql volatile as $$
+  update fence.refresh_resource set attempts = attempts + 1, leased_until = null,
+    due_at = now() + least(power(2, least(attempts, 12)) * interval '1 second', interval '5 minutes')
+  where tenant = t and resource = res
+$$;
+
+-- THE SLOW BACKSTOP. Claimed by one replica per interval. Re-sends each recent revocation ONCE, after it has settled
+-- (a grant a frozen relay landed late is withdrawn by that one re-send, because the relay's ordering delivers it
+-- after every earlier row for its relationship), and re-projects every principal at sweep priority.
+create or replace function fence.sweep(interval_ms bigint, settle_ms bigint, requeue boolean default true)
+returns table (requeued bigint, principals bigint)
+language plpgsql volatile as $$
+declare r bigint := 0; p bigint := 0; settle bigint := least(settle_ms, interval_ms);
+begin
+  insert into fence.sweep_claim (id, last_at) values (true, now())
+  on conflict (id) do update set last_at = now()
+  where fence.sweep_claim.last_at <= now() - interval_ms * interval '1 millisecond';
+  if not found then return query select 0::bigint, 0::bigint; return; end if;
+  if requeue then
+    with rq as (
+      update fence.outbox o set synced_at = null, zedtoken = null, requeued_at = now()
+      where o.op = 'delete' and o.error is null and o.requeued_at is null
+        and o.synced_at > now() - 2 * interval_ms * interval '1 millisecond'
+        and o.synced_at <= now() - settle * interval '1 millisecond'
+        and exists (select 1 from fence.view_relation v
+                    where v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation)
+        and not exists (select 1 from fence.outbox n where n.resource = o.resource and n.relation = o.relation
+                          and n.subject = o.subject and n.seq > o.seq)
+      returning 1)
+    select count(*) into r from rq;
+  end if;
+  with everyone as (
+    select tenant, principal from fence.principal_state where state <> 'retired'
+    union select tenant, principal from fence.subject
+  ), q as (
+    insert into fence.refresh (tenant, principal, priority, due_at, generation)
+    select tenant, principal, 2, now(), 1 from everyone
+    on conflict (tenant, principal) do update set generation = fence.refresh.generation + 1,
+      due_at = least(fence.refresh.due_at, now())
+    returning 1)
+  select count(*) into p from q;
+  return query select r, p;
+end $$;
+
+-- Liveness: the daemon beats this while it can reach SpiceDB and Postgres; reads fail closed when it stops.
+create or replace function fence.heartbeat(sc text default '*') returns void
+language sql volatile as $$
+  insert into fence.watch_state (scope, heartbeat_at) values (sc, now())
+  on conflict (scope) do update set heartbeat_at = now()
+$$;
