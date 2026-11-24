@@ -7,6 +7,10 @@
   were still being applied. The daemon now touches a marker relationship (`<resource_type>:__rebac_watch_marker`) when
   the stream opens and counts it current only once Watch delivers the marker's revision.
 
+- **`POST /lookup` and `GET /status` can require a bearer token** (`lookup_token_env`, the NAME of the variable that
+  holds it). A lookup's reply names how many containers a principal reads, and any caller could make the daemon ask
+  SpiceDB; with a token set, anything else is a 401. A non-loopback `listen` without a token logs a warning.
+
 ## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security

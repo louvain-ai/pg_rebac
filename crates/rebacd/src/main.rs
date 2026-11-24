@@ -216,11 +216,15 @@ async fn run(ctx: Arc<Ctx>) -> anyhow::Result<()> {
             tokio::spawn(loops::watch_loop(ctx.clone(), stop.clone())),
         ));
     }
+    let token = ctx.config.lookup_token()?;
     let listener = tokio::net::TcpListener::bind(&ctx.config.listen).await?;
+    if token.is_none() && !listener.local_addr()?.ip().is_loopback() {
+        tracing::warn!(listen = %ctx.config.listen, "POST /lookup and GET /status are open to anyone who can reach this address: set lookup_token_env");
+    }
     tracing::info!(listen = %ctx.config.listen, mode = ?ctx.config.mode, "rebacd running");
     let mut srv_stop = stop.clone();
     let server = tokio::spawn(async move {
-        axum::serve(listener, http::router(ctx))
+        axum::serve(listener, http::router(ctx, token))
             .with_graceful_shutdown(async move {
                 let _ = srv_stop.changed().await;
             })

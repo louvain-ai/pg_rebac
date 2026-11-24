@@ -60,6 +60,7 @@ spicedb_token_env = "SPICEDB_TOKEN"      # the NAME of the variable holding the 
 consistency       = "at_least_as_fresh"  # or "fully_consistent"
 mode              = "live"               # or "shadow"
 listen            = "127.0.0.1:7341"
+lookup_token_env  = "REBACD_LOOKUP_TOKEN" # optional: the NAME of the variable holding the bearer token /lookup needs
 watch             = true
 ```
 
@@ -161,6 +162,19 @@ curl -X POST localhost:7341/lookup -H 'content-type: application/json' \
 
 The answer is written down, an empty one included. If SpiceDB cannot answer, the reply is a 503, the principal is
 marked unavailable (`RB503` on the next read, never an empty set) and queued for retry.
+
+The reply names how many containers the principal reads, and any caller can make the daemon ask SpiceDB. So
+`POST /lookup` and `GET /status` are for your application only:
+
+- `listen` defaults to loopback (`127.0.0.1:7341`).
+- With `lookup_token_env` set, both require `Authorization: Bearer <token>`, compared in constant time; anything else
+  is a 401 that asks SpiceDB nothing. `GET /healthz` needs no token.
+- On any other address without a token, the daemon logs a warning at start.
+
+```sh
+curl -X POST localhost:7341/lookup -H "authorization: Bearer $REBACD_LOOKUP_TOKEN" \
+  -H 'content-type: application/json' -d '{"tenant": "acme", "principal": "priya"}'
+```
 
 ## TLS to Postgres
 

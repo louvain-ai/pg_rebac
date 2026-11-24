@@ -989,4 +989,55 @@ async fn the_daemon_end_to_end() {
         closure::recheck(&ctx).await.unwrap(),
         closure::Recheck::Rebuilt
     );
+
+    // THE LOOKUP ENDPOINT behind a bearer token: no token or a wrong one is 401 and asks SpiceDB nothing; the right one
+    // projects. /healthz stays open.
+    {
+        use tower::ServiceExt;
+        let ctx = std::sync::Arc::new(ctx);
+        let app = rebacd::http::router(ctx.clone(), Some("lookup-secret".into()));
+        let req = |auth: Option<&str>, path: &str| {
+            let mut b = axum::http::Request::builder()
+                .method(if path == "/lookup" { "POST" } else { "GET" })
+                .uri(path)
+                .header("content-type", "application/json");
+            if let Some(a) = auth {
+                b = b.header("authorization", a);
+            }
+            b.body(axum::body::Body::from(
+                r#"{"tenant":"acme","principal":"tok-probe"}"#,
+            ))
+            .unwrap()
+        };
+        for (auth, path) in [
+            (None, "/lookup"),
+            (Some("Bearer wrong"), "/lookup"),
+            (Some("lookup-secret"), "/lookup"),
+            (None, "/status"),
+        ] {
+            let r = app.clone().oneshot(req(auth, path)).await.unwrap();
+            assert_eq!(r.status(), 401, "{path} with {auth:?} is refused");
+        }
+        let n: i64 = ctx
+            .pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "select count(*) from rebac.principal_state where principal = 'tok-probe'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 0, "a refused lookup projects nothing");
+        let r = app
+            .clone()
+            .oneshot(req(Some("Bearer lookup-secret"), "/lookup"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "the right token is served");
+        let r = app.clone().oneshot(req(None, "/healthz")).await.unwrap();
+        assert_eq!(r.status(), 200, "/healthz needs no token");
+    }
 }

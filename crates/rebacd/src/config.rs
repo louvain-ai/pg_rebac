@@ -32,6 +32,10 @@ pub struct Config {
     pub consistency: Consistency,
     pub mode: Mode,
     pub listen: String,
+    /// The NAME of the environment variable holding a bearer token for `POST /lookup` and `GET /status`, never the
+    /// token. Set, each such request must carry `Authorization: Bearer <token>` (compared in constant time) or gets 401.
+    /// Unset, they are open to whoever can reach `listen`, which is why `listen` defaults to loopback.
+    pub lookup_token_env: Option<String>,
     pub deadline_ms: u64,
     pub read_deadline_ms: u64,
     pub heartbeat_ms: u64,
@@ -67,6 +71,7 @@ impl Default for Config {
             consistency: Consistency::AtLeastAsFresh,
             mode: Mode::Live,
             listen: "127.0.0.1:7341".into(),
+            lookup_token_env: None,
             deadline_ms: 5_000,
             read_deadline_ms: 3_000,
             heartbeat_ms: 1_000,
@@ -108,6 +113,18 @@ impl Config {
                 self.database_url_env
             )
         })
+    }
+    /// The bearer token `POST /lookup` and `GET /status` require, when `lookup_token_env` names one.
+    pub fn lookup_token(&self) -> anyhow::Result<Option<String>> {
+        match &self.lookup_token_env {
+            None => Ok(None),
+            Some(name) => match std::env::var(name) {
+                Ok(t) if !t.is_empty() => Ok(Some(t)),
+                _ => Err(anyhow::anyhow!(
+                    "lookup_token_env names {name}, which is unset or empty: set it to the bearer token callers send"
+                )),
+            },
+        }
     }
     pub fn spicedb_token(&self) -> anyhow::Result<String> {
         std::env::var(&self.spicedb_token_env).map_err(|_| {
