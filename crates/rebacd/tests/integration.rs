@@ -699,8 +699,7 @@ async fn the_daemon_end_to_end() {
     let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
     let reopened = std::time::Instant::now();
     let mut idle_current = false;
-    // Within watch_quiet_ms (3 s) and a little.
-    for _ in 0..600 {
+    for _ in 0..500 {
         if wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
             idle_current = true;
             break;
@@ -709,9 +708,39 @@ async fn the_daemon_end_to_end() {
     }
     assert!(
         idle_current,
-        "a stream reopened on an idle store is current without waiting for a change (watch_quiet_ms)"
+        "a stream reopened on an idle store is current at once: its stored position is the head"
     );
     eprintln!("idle reopen current after {:?}", reopened.elapsed());
+    // Current because the stored position reached the head, not because time passed: they are the same revision.
+    {
+        let c = ctx.pool.get().await.unwrap();
+        let pos: String = c
+            .query_one(
+                "select zedtoken from rebac.watch_state where scope = 'watch_applied'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let head = s
+            .head_revision(
+                "container:__rebac_head_probe",
+                "view",
+                "user:__rebac_head_probe",
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let (pos, head) = (
+            rebacd::revision::of_token(&pos).unwrap(),
+            rebacd::revision::of_token(&head).unwrap(),
+        );
+        assert_eq!(
+            rebacd::revision::covers(&pos, &head),
+            Some(true),
+            "idle: position {pos:?} is the head {head:?}"
+        );
+    }
 
     // A POSITION SPICEDB REFUSES restarts from head with a gap: sets looked up before fail closed, the sweep is forced.
     stop_tx.send(true).unwrap();

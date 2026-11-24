@@ -296,19 +296,11 @@ async fn resume_position(ctx: &Ctx) -> anyhow::Result<Option<String>> {
     })
 }
 
-async fn types_watched(ctx: &Ctx) -> anyhow::Result<Vec<String>> {
-    Ok(ctx
-        .pool
-        .get()
-        .await?
-        .query(
-            "select distinct resource_type from rebac.view_relation",
-            &[],
-        )
-        .await?
-        .iter()
-        .map(|r| r.get(0))
-        .collect())
+/// EVERY type is watched (an empty filter). rebac.apply_watch skips relations outside the closure, and watching all of
+/// them means every revision past a stored position carries something the stream delivers, which is what lets a
+/// resumed stream compare its position with the head exactly (an idle store's head is its last delivered revision).
+async fn types_watched(_ctx: &Ctx) -> anyhow::Result<Vec<String>> {
+    Ok(vec![])
 }
 
 /// Make sure a Watch position is stored, restarting from head (with a gap) when none is. The backfill calls this
@@ -486,14 +478,13 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
     // touches a marker relationship once the stream is open and waits for its revision, for a datastore whose
     // revisions crate::revision cannot compare.
     //
-    // A QUIET STREAM: a store with nothing to replay may send nothing at all, not even the response headers that
-    // complete the open (SpiceDB's in-memory datastore sends no idle checkpoint, and its head revision is a clock
-    // reading that no position reaches until the next change). A resumed stream that has delivered nothing for
-    // `watch_quiet_ms` (well above SpiceDB's 1 s Watch heartbeat, after which a datastore that heartbeats has sent a
-    // checkpoint at the head) has nothing left to replay, and counts as current.
+    // AN IDLE STORE sends a resumed stream nothing at all, not even the reply that completes the open (SpiceDB's
+    // in-memory datastore sends no idle checkpoint). Its head is then the stored position itself, so the comparison
+    // below makes the stream current at once, before the open completes. Every type is watched (changes to relations
+    // outside the closure are skipped by rebac.apply_watch), so any revision past the stored position carries a change
+    // the stream delivers: a head past the position always means a replay to wait for, never a quiet store.
     let mut caught_up = false;
     let opened = std::time::Instant::now();
-    let quiet = Duration::from_millis(ctx.config.watch_quiet_ms);
     let mut alive = tokio::time::interval(Duration::from_millis(ctx.config.heartbeat_ms.max(100)));
     let mut target = if apply && !ctx.config.watch_marker {
         Some(catch_up_target(ctx).await?)
@@ -508,18 +499,11 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
             tracing::debug!("Watch caught up at open: nothing to replay");
         }
     }
-    let quiet_ok = apply && !restart && !quiet.is_zero() && target.is_some();
     let open = ctx.spicedb.watch(types, from.clone());
     tokio::pin!(open);
-    let quiet_at = tokio::time::Instant::now() + quiet;
     let opened_stream = loop {
         tokio::select! {
             s = &mut open => break s,
-            _ = tokio::time::sleep_until(quiet_at), if quiet_ok && !caught_up => {
-                caught_up = true;
-                mark_caught_up(ctx, opened).await?;
-                tracing::debug!("Watch caught up: the resumed stream has nothing to deliver");
-            }
             _ = alive.tick(), if caught_up && apply => {
                 if !crate::leader::is_leader(ctx) {
                     anyhow::bail!("no longer the leader: stopping the Watch stream");
@@ -539,7 +523,6 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
         target = Some(catch_up_target(ctx).await?);
     }
     let catch_up_by = tokio::time::Instant::now() + 6 * ctx.config.deadline();
-    let mut last_msg = tokio::time::Instant::now();
     loop {
         let msg = tokio::select! {
             m = stream.message() => m,
@@ -551,18 +534,11 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
                 crate::leader::fenced_execute(ctx, "select rebac.watch_alive()", &[]).await?;
                 continue;
             }
-            _ = tokio::time::sleep_until(last_msg + quiet), if quiet_ok && !caught_up => {
-                caught_up = true;
-                mark_caught_up(ctx, opened).await?;
-                tracing::debug!("Watch caught up: the stream is quiet, nothing left to replay");
-                continue;
-            }
             _ = tokio::time::sleep_until(catch_up_by), if apply && !caught_up => {
                 anyhow::bail!("Watch did not reach the revision read when it opened within {:?}; reopening (reads stay closed)", 6 * ctx.config.deadline());
             }
             _ = stop.changed() => return Ok(Resume::Same),
         };
-        last_msg = tokio::time::Instant::now();
         let msg = match msg {
             Ok(Some(m)) => m,
             Ok(None) => return Ok(Resume::Same),

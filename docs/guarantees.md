@@ -144,12 +144,11 @@
     unless that backend still holds the lock, so a daemon whose lock connection died cannot commit another Watch write,
     even before it notices. Another daemon takes the lock within `leader_retry_ms` (2 s) and resumes Watch from the
     applied position (`leader_election = false` runs everything in every daemon, for a single daemon).
-    - **A quiet resumed stream.** A store with nothing to replay may send a resumed stream nothing at all (SpiceDB's
-      in-memory datastore sends no idle checkpoint, and its head revision is a clock reading no position reaches until
-      the next change). A resumed stream that delivers nothing for `watch_quiet_ms` (3 s, above SpiceDB's 1 s Watch
-      heartbeat, after which a datastore that heartbeats has already sent a checkpoint at the head) counts as current.
-      This rests on SpiceDB delivering a replay without pausing for that long; `watch_quiet_ms = 0` turns it off,
-      leaving only the head comparison.
+    - **An idle store.** A store with nothing to replay may send a resumed stream nothing at all, not even the reply
+      that completes the open (SpiceDB's in-memory datastore sends no idle checkpoint). Its head revision is then the
+      stored position itself, so the stream is current at once. The daemon watches every type (`rebac.apply_watch`
+      skips relations outside the closure), so a head past the stored position always carries a change the stream
+      will deliver: there is no timing rule.
     - **No position at all** (a first start): the daemon reads the head revision, records the gap at it
       (`rebac.watch_restarted`) and resumes from there. A store that cannot serve Watch fails every read closed with Watch on: set
     `watch = false` there, and G7's sweep bound applies instead. In shadow mode Watch only counts, under its own position

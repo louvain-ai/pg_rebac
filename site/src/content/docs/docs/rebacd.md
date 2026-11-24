@@ -83,7 +83,6 @@ watch             = true
 | `closure_check_ms` | 10000 | How often the live schema is re-read for a closure change |
 | `watch_resume_max_age_ms` | 3600000 | The oldest Watch position resumed from; older restarts from head with a gap |
 | `watch_marker` | false | A reopened stream waits for a marker relationship it touches, not for the head revision |
-| `watch_quiet_ms` | 3000 | A resumed stream that delivers nothing this long has nothing to replay, and counts as current; 0 off |
 | `leader_election` | true | Only the daemon holding the leader lock runs Watch, the closure check and the sweep |
 | `leader_retry_ms` | 2000 | How often a daemon that does not lead tries the lock |
 

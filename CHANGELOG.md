@@ -21,8 +21,9 @@
   deposed leader cannot commit another. `leader_election` (on) and `leader_retry_ms` (2 s) are new settings.
 - **A Watch stream on an idle store goes current (fix).** In 0.2.0 a live daemon with Watch on, restarted against an
   idle in-memory SpiceDB, never heartbeated until the next change, so every read was refused. A first start now
-  restarts from the head revision read directly, and a resumed stream that delivers nothing for `watch_quiet_ms`
-  (new, 3 s) counts as current.
+  restarts from the head revision read directly, and a resumed stream whose stored position is the head is current
+  at once. Watch now follows every type (relations outside the closure are skipped), so a head past the position
+  always means changes the stream delivers.
 
 - **`rebac.rls_bypasses(tbl)`: who reads a fenced table without the fence** (superusers, `BYPASSRLS` roles, an owner
   without FORCE, views without `security_invoker`, materialized views). `rebac.enable_rls` warns about each.
