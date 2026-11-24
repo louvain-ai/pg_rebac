@@ -16,6 +16,8 @@ pub struct Backfilled {
 }
 
 pub async fn backfill(ctx: &Ctx, tenant: &str) -> anyhow::Result<Backfilled> {
+    // A Watch position from before anything is projected, so the daemon resumes from it with no gap.
+    crate::loops::ensure_watch_position(ctx).await?;
     let db = ctx.pool.get().await?;
     let prefix: String = db
         .query_one("select rebac.prefix($1)", &[&tenant])

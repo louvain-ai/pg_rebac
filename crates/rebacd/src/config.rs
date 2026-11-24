@@ -46,7 +46,14 @@ pub struct Config {
     pub refresh_idle_ms: u64,
     pub sweep_interval_ms: i64,
     pub sweep_settle_ms: i64,
+    /// Follow SpiceDB's Watch and apply changes made outside rebac.write (revocations narrowed at once). On, the
+    /// heartbeat also requires the stream: a store that cannot serve Watch fails every read closed, so turn it off
+    /// there, and such changes then wait for the sweep (G7).
     pub watch: bool,
+    /// The oldest applied Watch position the daemon resumes from. Older, it restarts from head with a gap (sets looked
+    /// up before fail closed until re-projected), because SpiceDB may have garbage-collected the changes in between
+    /// without an error. Keep it below SpiceDB's `--datastore-gc-window` (24 h by default).
+    pub watch_resume_max_age_ms: u64,
     /// How often the live schema is re-read to re-derive the closure (besides Watch's schema notices).
     pub closure_check_ms: u64,
 }
@@ -75,6 +82,7 @@ impl Default for Config {
             sweep_interval_ms: 15 * 60_000,
             sweep_settle_ms: 5 * 60_000,
             watch: true,
+            watch_resume_max_age_ms: 60 * 60_000,
             closure_check_ms: 10_000,
         }
     }

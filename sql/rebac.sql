@@ -164,6 +164,11 @@ create table if not exists rebac.outbox (
   error         text,
   requeued_at   timestamptz
 );
+-- Where a row came from: 'write' (rebac.write, relayed to SpiceDB) or 'watch' (a change made in SpiceDB without
+-- rebac.write, seen on Watch and applied here: never relayed and never re-sent, since SpiceDB already holds it).
+alter table rebac.outbox add column if not exists origin text not null default 'write';
+alter table rebac.outbox drop constraint if exists outbox_origin_check;
+alter table rebac.outbox add constraint outbox_origin_check check (origin in ('write', 'watch'));
 create index if not exists outbox_unsynced_idx on rebac.outbox (tenant, seq) where synced_at is null;
 create index if not exists outbox_relationship_idx on rebac.outbox (resource, relation, subject, seq desc);
 create index if not exists outbox_xid_idx on rebac.outbox (committed_xid);
@@ -187,11 +192,19 @@ create table if not exists rebac.watch_state (
   scope          text primary key,
   zedtoken       text,
   heartbeat_at   timestamptz,
-  external_writes bigint not null default 0   -- relationship changes seen on Watch that did not come through rebac.write
+  external_writes bigint not null default 0   -- relationship changes seen on Watch that did not come through
+                                              -- rebac.write (applied: rebac.apply_watch)
 );
--- When the Watch stream last delivered a message (a change or a checkpoint). Reported, never part of the read bound:
--- Watch is observe-only, so its position says nothing about the projection.
+-- When the Watch stream was last known current: a message applied, or the stream connected with everything it
+-- delivered applied. The daemon resumes from a position only while this is within watch_resume_max_age_ms.
 alter table rebac.watch_state add column if not exists watched_at timestamptz;
+
+-- THE WATCH GAP. When the daemon cannot resume Watch from the position it applied through (none stored, a position
+-- SpiceDB refuses, or one older than `watch_resume_max_age_ms`), it restarts from SpiceDB's head and records when.
+-- Changes made outside rebac.write in between were never applied, so a principal whose lookup began before
+-- `gap_at` fails closed (RB503) until it is re-projected; the daemon forces a sweep to do that. The applied position
+-- is kept under scope 'watch_applied' (0.1's observe-only position, scope 'watch', applied nothing).
+alter table rebac.watch_state add column if not exists gap_at timestamptz;
 
 -- Functions the application registers to run inside a narrowing transaction: fn(tenant text, containers text[]).
 create table if not exists rebac.narrow_hook (
@@ -307,6 +320,7 @@ declare
   bound bigint := coalesce(rebac.setting('max_staleness_ms'), '0')::bigint;
   age bigint := coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint;
   beat timestamptz;
+  gap timestamptz;
   cl rebac.closure_state;
   st rebac.principal_state;
 begin
@@ -342,6 +356,12 @@ begin
         raise exception 'rebac: the projection of this principal is older than % ms, or of unknown age', age
           using errcode = 'RB503',
                 hint = 'rebac_not_fresh: the daemon''s sweep re-projects everyone; POST /lookup re-projects one now';
+      end if;
+      -- THE WATCH GAP: Watch restarted from head, so changes made outside rebac.write before that were never applied.
+      select w.gap_at into gap from rebac.watch_state w where w.scope = 'watch_applied';
+      if gap is not null and (st.looked_up_at is null or st.looked_up_at < gap) then
+        raise exception 'rebac: this principal was projected before Watch last lost its position'
+          using errcode = 'RB503', hint = 'rebac_watch_gap: the sweep the daemon forced, or POST /lookup, re-projects it';
       end if;
       if cl.changed_at > '-infinity' and (st.looked_up_at is null or st.looked_up_at < cl.changed_at) then
         raise exception 'rebac: this principal was projected before the schema''s closure last changed'
@@ -567,6 +587,28 @@ $$;
 -- The write side: rebac.write and revocation-first narrowing.
 -- -------------------------------------------------------------------------------------------------------------------
 
+-- Mirror a touched arrow tuple into rebac.edge, and a touched grant to a subject set into rebac.set_grant, so narrowing
+-- never needs SpiceDB. A delete keeps its mirror row until narrowing has used it; narrow_seqs removes it.
+create or replace function rebac.mirror(t text, op text, resource text, relation text, subject text) returns void
+language plpgsql volatile as $$
+begin
+  if op <> 'touch' or rebac.obj_type(resource) <> rebac.setting('resource_type') then return; end if;
+  if exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
+               and vr.relation = mirror.relation and vr.kind = 'arrow') then
+    insert into rebac.edge (tenant, child, relation, parent)
+    values (t, rebac.strip(t, rebac.obj_id(resource)), mirror.relation,
+            rebac.obj_type(subject) || ':' || rebac.strip(t, rebac.obj_id(subject)))
+    on conflict do nothing;
+  end if;
+  if strpos(subject, '#') > 0
+     and exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
+                   and vr.relation = mirror.relation and vr.kind = 'direct') then
+    insert into rebac.set_grant (tenant, container, relation, subject_set)
+    values (t, rebac.strip(t, rebac.obj_id(resource)), mirror.relation, rebac.set_ref(t, subject))
+    on conflict do nothing;
+  end if;
+end $$;
+
 -- Queue one relationship write in the caller's transaction. Arrow tuples are mirrored into rebac.edge at once, so
 -- narrowing never needs SpiceDB. A reference whose id does not carry this tenant's prefix is refused.
 create or replace function rebac.write(op text, resource text, relation text, subject text) returns bigint
@@ -574,9 +616,6 @@ language plpgsql volatile as $$
 declare
   t text := rebac.tenant();
   new_seq bigint;
-  v rebac.view_relation;
-  child text;
-  parent text;
 begin
   if op not in ('touch', 'delete') then
     raise exception 'rebac.write: op must be touch or delete' using errcode = 'RB422';
@@ -602,24 +641,7 @@ begin
   insert into rebac.outbox (tenant, op, resource, relation, subject)
   values (t, op, resource, relation, subject) returning outbox.seq into new_seq;
 
-  select * into v from rebac.view_relation vr
-  where vr.resource_type = rebac.obj_type(resource) and vr.relation = write.relation and vr.kind = 'arrow';
-  if found and rebac.obj_type(resource) = rebac.setting('resource_type') then
-    child := rebac.strip(t, rebac.obj_id(resource));
-    parent := rebac.obj_type(subject) || ':' || rebac.strip(t, rebac.obj_id(subject));
-    if op = 'touch' then
-      insert into rebac.edge (tenant, child, relation, parent) values (t, child, write.relation, parent)
-      on conflict do nothing;
-    end if;
-    -- A delete keeps the edge until commit-time narrowing has used it; narrow_pending removes it.
-  end if;
-  if op = 'touch' and strpos(subject, '#') > 0 and rebac.obj_type(resource) = rebac.setting('resource_type')
-     and exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
-                   and vr.relation = write.relation and vr.kind = 'direct') then
-    insert into rebac.set_grant (tenant, container, relation, subject_set)
-    values (t, rebac.strip(t, rebac.obj_id(resource)), write.relation, rebac.set_ref(t, subject))
-    on conflict do nothing;
-  end if;
+  perform rebac.mirror(t, op, resource, relation, subject);
   return new_seq;
 end $$;
 
@@ -843,8 +865,8 @@ create trigger rebac_outbox_notify after insert on rebac.outbox
 -- -------------------------------------------------------------------------------------------------------------------
 
 -- What an operator watches. heartbeat_age_ms and stale are LIVENESS; oldest_lookup_ms and unfresh_principals are
--- FRESHNESS (the read bound); relay_lag_ms and watch_age_ms are reported only (a slow relay only delays grants, and
--- Watch is observe-only).
+-- FRESHNESS (the read bound); relay_lag_ms and watch_age_ms are reported only (a slow relay only delays grants, and a
+-- Watch that is not applying stops the heartbeat, which is what fails reads closed).
 drop function if exists rebac.status();
 create or replace function rebac.status() returns table (
   heartbeat_age_ms bigint, stale boolean, pending_outbox bigint, quarantined bigint, refresh_queue bigint,
@@ -1013,7 +1035,10 @@ language sql volatile as $$
   values (t, p, pri, token, now(), 1)
   on conflict (tenant, principal) do update
     set priority = least(rebac.refresh.priority, excluded.priority),
-        zedtoken = coalesce(excluded.zedtoken, rebac.refresh.zedtoken),
+        -- '' is "fully consistent" (a change seen on Watch), and it sticks: a later enqueue at an older token
+        -- must not let the refresh be served from a revision before that change.
+        zedtoken = case when rebac.refresh.zedtoken = '' or excluded.zedtoken = '' then ''
+                        else coalesce(excluded.zedtoken, rebac.refresh.zedtoken) end,
         due_at = least(rebac.refresh.due_at, now()),
         generation = rebac.refresh.generation + 1
 $$;
@@ -1075,12 +1100,19 @@ end $$;
 create or replace function rebac.record_delivery(delivered bigint[], token text, refused bigint[], reasons text[])
 returns integer
 language plpgsql volatile as $$
-declare queued integer := 0; n integer;
 begin
   update rebac.outbox set synced_at = now(), zedtoken = token where seq = any(delivered);
   update rebac.outbox o set synced_at = now(), error = r.reason
   from unnest(refused, reasons) as r(seq, reason) where o.seq = r.seq;
+  return rebac.queue_refreshes(delivered, token);
+end $$;
 
+-- The refreshes that SpiceDB-held outbox rows require, at `token` ('' is fully consistent).
+create or replace function rebac.queue_refreshes(delivered bigint[], token text)
+returns integer
+language plpgsql volatile as $$
+declare queued integer := 0; n integer;
+begin
   -- Direct and via relations name their subject: refresh the principals it stands for. A revocation first.
   with rows as (
     select o.tenant, o.op, o.subject
@@ -1103,7 +1135,9 @@ begin
    and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(o.subject, '#') > 0))
   where o.seq = any(delivered)
   on conflict (tenant, resource) do update
-    set zedtoken = excluded.zedtoken, due_at = least(rebac.refresh_resource.due_at, now()),
+    set zedtoken = case when rebac.refresh_resource.zedtoken = '' or excluded.zedtoken = '' then ''
+                        else excluded.zedtoken end,
+        due_at = least(rebac.refresh_resource.due_at, now()),
         generation = rebac.refresh_resource.generation + 1;
   get diagnostics n = row_count;
   return queued + n;
@@ -1211,6 +1245,93 @@ create or replace function rebac.heartbeat(sc text default '*') returns void
 language sql volatile as $$
   insert into rebac.watch_state (scope, heartbeat_at) values (sc, now())
   on conflict (scope) do update set heartbeat_at = now()
+$$;
+
+-- WATCH, APPLIED. One Watch message: the relationship changes SpiceDB committed at `token`, as parallel arrays.
+-- Changes to the closure's relations that did not come through rebac.write are applied as if they had: recorded in
+-- the outbox as origin 'watch' (already in SpiceDB, so never relayed or re-sent), mirrored into edge and set_grant,
+-- and their revocations narrowed now by narrow_seqs, under the same lock order as a commit (the tenant held
+-- exclusively for an arrow or a set grant). Every principal narrowed, and every principal or resource the changes
+-- name, is refreshed FULLY CONSISTENT, so no refresh can be served from a revision before them. Runs in the caller's
+-- transaction with the applied position, so a message is applied exactly when its position is recorded. If narrowing
+-- cannot take a lock within narrow_lock_timeout_ms this raises and nothing is recorded: the daemon stops beating and
+-- retries from the same position. `apply` false only counts (a shadow daemon owns no live projection).
+-- A change is OURS, and skipped, when the outbox holds the same operation on the same relationship either undelivered
+-- (the relay has it in hand; a revocation among them narrowed at its commit) or delivered at this very token.
+create or replace function rebac.apply_watch(ops text[], resources text[], relations text[], subjects text[],
+                                             token text, apply boolean default true)
+returns table (external integer, narrowed integer)
+language plpgsql volatile as $$
+declare
+  sep text := coalesce(rebac.setting('tenant_separator'), '');
+  n_ext integer := 0;
+  n_narrowed integer := 0;
+  seqs bigint[] := '{}';
+  new_seq bigint;
+  i integer;
+  t text;
+  tenants text[];
+begin
+  for i in 1 .. coalesce(cardinality(ops), 0) loop
+    continue when ops[i] not in ('touch', 'delete');
+    continue when not exists (select 1 from rebac.view_relation v
+                              where v.resource_type = rebac.obj_type(resources[i]) and v.relation = relations[i]);
+    continue when exists (select 1 from rebac.outbox o
+                          where o.resource = resources[i] and o.relation = relations[i] and o.subject = subjects[i]
+                            and o.op = ops[i] and (o.synced_at is null or o.zedtoken = token));
+    if sep = '' then
+      -- Ids carry no tenant: the change applies in every tenant this database knows.
+      select coalesce(array_agg(x), '{}') into tenants from (
+        select tenant from rebac.principal_state union select tenant from rebac.subject
+        union select tenant from rebac.edge union select tenant from rebac.set_grant) k(x);
+    else
+      continue when strpos(rebac.obj_id(resources[i]), sep) = 0;
+      tenants := array[split_part(rebac.obj_id(resources[i]), sep, 1)];
+    end if;
+    n_ext := n_ext + 1;
+    continue when not apply;
+    foreach t in array tenants loop
+      -- A tuple whose ids carry another tenant's prefix maps to nobody (G5).
+      continue when rebac.strip(t, rebac.obj_id(resources[i])) is null
+                 or rebac.strip(t, split_part(rebac.obj_id(subjects[i]), '#', 1)) is null;
+      insert into rebac.outbox (tenant, op, resource, relation, subject, synced_at, zedtoken, requeued_at, origin)
+      values (t, ops[i], resources[i], relations[i], subjects[i], now(), token, now(), 'watch')
+      returning seq into new_seq;
+      seqs := seqs || new_seq;
+      perform rebac.mirror(t, ops[i], resources[i], relations[i], subjects[i]);
+    end loop;
+  end loop;
+  if cardinality(seqs) > 0 then
+    n_narrowed := rebac.narrow_pending();
+    -- Everyone narrowed (an arrow's or a set grant's holders included, whom the change does not name) is refreshed,
+    -- fully consistent: an over-narrowed one comes back, and none can regrow from an older revision.
+    if to_regclass('pg_temp.rebac_narrow_pairs') is not null then
+      execute 'select count(*) from (select distinct tenant, principal from pg_temp.rebac_narrow_pairs) n,
+                 lateral (select rebac.enqueue_refresh(n.tenant, n.principal, 0::smallint, '''')) x';
+    end if;
+    perform rebac.queue_refreshes(seqs, '');
+  end if;
+  insert into rebac.watch_state (scope, zedtoken, external_writes, watched_at)
+  values ('watch_applied', token, n_ext, now())
+  on conflict (scope) do update set zedtoken = coalesce(excluded.zedtoken, rebac.watch_state.zedtoken),
+    external_writes = rebac.watch_state.external_writes + excluded.external_writes, watched_at = now();
+  return query select n_ext, n_narrowed;
+end $$;
+
+-- Watch restarted from SpiceDB's head at `token`, its earlier position lost: every set looked up before now fails
+-- closed until it is re-projected (rebac.checked), and the next sweep check runs the sweep to re-project them.
+create or replace function rebac.watch_restarted(token text) returns void
+language sql volatile as $$
+  insert into rebac.watch_state (scope, zedtoken, watched_at, gap_at)
+  values ('watch_applied', token, now(), clock_timestamp())
+  on conflict (scope) do update set zedtoken = excluded.zedtoken, watched_at = now(), gap_at = clock_timestamp();
+  update rebac.sweep_claim set last_at = now() - interval '1 year';
+$$;
+
+-- The stream is connected and every change it delivered is applied: the applied position is current as of now.
+create or replace function rebac.watch_alive() returns void
+language sql volatile as $$
+  update rebac.watch_state set watched_at = now() where scope = 'watch_applied'
 $$;
 
 -- The daemon's closure transitions. INVALIDATE: reads fail closed from now on. ACCEPT: the rebuild is done; the

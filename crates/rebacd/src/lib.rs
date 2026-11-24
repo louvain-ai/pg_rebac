@@ -37,6 +37,8 @@ pub struct Ctx {
     pub projection: db::Projection,
     /// Watch kicks this when SpiceDB reports a schema change, so the closure is re-checked at once.
     pub closure_kick: tokio::sync::Notify,
+    /// The Watch stream is connected and has applied every message it delivered (the heartbeat requires it).
+    pub watch_current: std::sync::atomic::AtomicBool,
 }
 
 impl Ctx {
@@ -55,6 +57,7 @@ impl Ctx {
             spicedb,
             projection,
             closure_kick: tokio::sync::Notify::new(),
+            watch_current: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }

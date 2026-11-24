@@ -113,6 +113,16 @@ pub async fn refresh_one(
         .iter()
         .map(|r| r.get(0))
         .collect();
+    // A change seen on Watch since this refresh was claimed re-queues it FULLY CONSISTENT (zedtoken ''); it committed
+    // before this lock was granted, so read it now and never look up at the older token it was claimed with.
+    let requeued_full: bool = tx
+        .query_one(
+            "select exists (select 1 from rebac.refresh where tenant = $1 and principal = $2 and zedtoken = '')",
+            &[&tenant, &principal],
+        )
+        .await?
+        .get(0);
+    let token = if requeued_full { None } else { token };
     // FRESHNESS is stamped from this database's clock, just before SpiceDB is asked: the set reflects every change
     // SpiceDB held at this instant (or, at_least_as_fresh, within SpiceDB's revision quantization of it).
     let looked_up_at: std::time::SystemTime =

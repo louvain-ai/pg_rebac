@@ -18,7 +18,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the loops: relay, refresh, sweep, heartbeat, Watch (observe-only), and the lazy-lookup endpoint.
+    /// Run the loops: relay, refresh, sweep, heartbeat, Watch (applies changes made outside rebac.write), the closure
+    /// check, and the lazy-lookup endpoint.
     Run {
         /// Replace rebac.view_relation when the schema's closure differs from it (and re-project everyone).
         #[arg(long)]

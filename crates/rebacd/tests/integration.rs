@@ -36,13 +36,18 @@ fn enabled() -> bool {
     false
 }
 
-const PG: &str = "postgres://postgres:rebac@127.0.0.1:55433";
+/// The test Postgres (`docker compose`'s by default; `REBAC_IT_PG` points elsewhere).
+fn pg() -> String {
+    std::env::var("REBAC_IT_PG")
+        .unwrap_or_else(|_| "postgres://postgres:rebac@127.0.0.1:55433".into())
+}
 const KEY: &str = "rebac-test-key";
 
 async fn fresh_db(name: &str) -> String {
-    let (admin, conn) = tokio_postgres::connect(&format!("{PG}/postgres"), tokio_postgres::NoTls)
-        .await
-        .unwrap();
+    let (admin, conn) =
+        tokio_postgres::connect(&format!("{}/postgres", pg()), tokio_postgres::NoTls)
+            .await
+            .unwrap();
     tokio::spawn(conn);
     admin
         .batch_execute(&format!("drop database if exists {name} with (force)"))
@@ -52,7 +57,7 @@ async fn fresh_db(name: &str) -> String {
         .batch_execute(&format!("create database {name}"))
         .await
         .unwrap();
-    let url = format!("{PG}/{name}");
+    let url = format!("{}/{name}", pg());
     let (db, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
         .unwrap();
@@ -425,13 +430,45 @@ async fn the_daemon_end_to_end() {
         .unwrap();
     assert_eq!((d.extra_rows, d.missing_rows), (0, 0), "{d:?}");
 
-    // HEARTBEAT: beaten while SpiceDB answers; reads are fresh, and back-dated past 5 s they fail closed.
+    // HEARTBEAT: beaten while SpiceDB answers; reads are fresh, and back-dated past 5 s they fail closed. With Watch
+    // on, a beat also needs the stream: a daemon whose Watch is not running does not beat.
+    {
+        let (stop_tx, stop) = tokio::sync::watch::channel(false);
+        sql(&ctx, "delete from rebac.watch_state where scope = '*'").await;
+        let hb = tokio::spawn(loops::heartbeat_loop(
+            std::sync::Arc::new(
+                Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
+                    .await
+                    .unwrap(),
+            ),
+            stop,
+        ));
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        stop_tx.send(true).unwrap();
+        hb.await.unwrap();
+        let beats: i64 = ctx
+            .pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "select count(*) from rebac.watch_state where scope = '*'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(beats, 0, "no beat while Watch is not applying");
+    }
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let hb = tokio::spawn(loops::heartbeat_loop(
         std::sync::Arc::new(
-            Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
-                .await
-                .unwrap(),
+            Ctx::connect(Config {
+                watch: false,
+                ..config("REBAC_IT_DB", &endpoint, Mode::Live)
+            })
+            .await
+            .unwrap(),
         ),
         stop.clone(),
     ));
@@ -466,52 +503,217 @@ async fn the_daemon_end_to_end() {
         assert_eq!(err.code().map(|c| c.code()), Some("RB503"));
     }
 
-    // WATCH, observe-only: a write made straight to SpiceDB (not through rebac.write) is counted as external.
+    // WATCH, APPLIED: a revocation written straight to SpiceDB (not through rebac.write) is in force within seconds,
+    // with nothing but the Watch loop running: no relay, no refresh, no sweep.
+    sql(&ctx, "select rebac.heartbeat('*')").await;
+    s.write(
+        &[op(
+            true,
+            "container:acme/ext-doc",
+            "member",
+            "user:acme/ext",
+        )],
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    project::refresh_one(&ctx, "acme", "ext", None, ctx.config.deadline())
+        .await
+        .unwrap();
+    assert_eq!(set_of(&ctx, "acme", "ext").await, vec!["ext-doc"]);
+    let wctx = std::sync::Arc::new(
+        Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
+            .await
+            .unwrap(),
+    );
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
-    let w = tokio::spawn(loops::watch_loop(
-        std::sync::Arc::new(
-            Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
-                .await
-                .unwrap(),
-        ),
-        stop,
-    ));
-    let mut counted = false;
-    for i in 0..100 {
-        if i % 10 == 0 {
-            s.write(
-                &[op(
-                    true,
-                    "container:acme/elsewhere",
-                    "member",
-                    &format!("user:acme/ext{i}"),
-                )],
-                Duration::from_secs(2),
-            )
-            .await
-            .unwrap();
+    let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
+    for _ in 0..100 {
+        if wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
         }
-        let n: Option<i64> = ctx
-            .pool
-            .get()
-            .await
-            .unwrap()
-            .query_opt(
-                "select external_writes from rebac.watch_state where scope = 'watch'",
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst),
+        "the Watch stream is applying"
+    );
+    let revoked_at = std::time::Instant::now();
+    s.write(
+        &[op(
+            false,
+            "container:acme/ext-doc",
+            "member",
+            "user:acme/ext",
+        )],
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let mut gone = None;
+    for _ in 0..100 {
+        if set_of(&ctx, "acme", "ext").await.is_empty() {
+            gone = Some(revoked_at.elapsed());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let gone = gone.expect("an external revocation is narrowed from Watch within 2 s");
+    eprintln!("external revocation narrowed after {gone:?}");
+    {
+        let c = ctx.pool.get().await.unwrap();
+        c.batch_execute("set rebac.tenant = 'acme'").await.unwrap();
+        assert!(
+            c.query("select * from rebac.readable_set('ext')", &[])
+                .await
+                .unwrap()
+                .is_empty(),
+            "the reader has lost it"
+        );
+        let n: i64 = c
+            .query_one(
+                "select count(*) from rebac.outbox where origin = 'watch' and op = 'delete'
+                   and resource = 'container:acme/ext-doc'",
                 &[],
             )
             .await
             .unwrap()
-            .map(|r| r.get(0));
-        if n.unwrap_or(0) > 0 {
-            counted = true;
+            .get(0);
+        assert_eq!(n, 1, "recorded once, as applied from Watch");
+    }
+
+    // A RELAYED write is ours: its echo on Watch is skipped, not applied twice.
+    let before: i64 = ctx
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select count(*) from rebac.outbox where origin = 'watch'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    sql(
+        &ctx,
+        "set rebac.tenant = 'acme'; select rebac.write('touch', 'container:acme/ours', 'member', 'user:acme/ext')",
+    )
+    .await;
+    relay::relay_once(&ctx).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after: i64 = ctx
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select count(*) from rebac.outbox where origin = 'watch'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        before, after,
+        "the relay's own write is not taken for an external one"
+    );
+
+    // A DISCONNECT: the stream stops (the daemon restarts), a revocation is made meanwhile, and the next stream resumes
+    // from the applied position and narrows it.
+    stop_tx.send(true).unwrap();
+    w.await.unwrap();
+    assert!(!wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst));
+    s.write(
+        &[op(true, "container:acme/ext-2", "member", "user:acme/ext")],
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    project::refresh_one(&ctx, "acme", "ext", None, ctx.config.deadline())
+        .await
+        .unwrap();
+    assert!(set_of(&ctx, "acme", "ext")
+        .await
+        .contains(&"ext-2".to_string()));
+    s.write(
+        &[op(false, "container:acme/ext-2", "member", "user:acme/ext")],
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
+    let mut resumed = false;
+    for _ in 0..100 {
+        if !set_of(&ctx, "acme", "ext")
+            .await
+            .contains(&"ext-2".to_string())
+        {
+            resumed = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        resumed,
+        "a revocation made while Watch was down is applied on resume"
+    );
+
+    // A POSITION SPICEDB REFUSES restarts from head with a gap: sets looked up before fail closed, the sweep is forced.
+    stop_tx.send(true).unwrap();
+    w.await.unwrap();
+    sql(
+        &ctx,
+        "update rebac.watch_state set zedtoken = 'not-a-zedtoken' where scope = 'watch_applied';
+         insert into rebac.sweep_claim (id, last_at) values (true, now()) on conflict (id) do update set last_at = now()",
+    )
+    .await;
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
+    let mut gapped = false;
+    for _ in 0..100 {
+        let g: bool = ctx.pool.get().await.unwrap()
+            .query_one("select coalesce((select gap_at > now() - interval '10 seconds' and zedtoken <> 'not-a-zedtoken'
+                        from rebac.watch_state where scope = 'watch_applied'), false)", &[])
+            .await.unwrap().get(0);
+        if g && wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
+            gapped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     stop_tx.send(true).unwrap();
     w.await.unwrap();
-    assert!(counted, "an external write is counted on Watch");
+    assert!(
+        gapped,
+        "a refused position restarts from head and records the gap"
+    );
+    {
+        let c = ctx.pool.get().await.unwrap();
+        c.batch_execute("set rebac.tenant = 'acme'").await.unwrap();
+        let err = c
+            .query("select * from rebac.readable_set('ext')", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code().map(|c| c.code()),
+            Some("RB503"),
+            "looked up before the gap"
+        );
+        let forced: bool = c
+            .query_one(
+                "select last_at < now() - interval '1 day' from rebac.sweep_claim",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(forced, "the sweep is forced");
+    }
+    // Everyone the test reads below is re-projected after the gap (what the forced sweep does).
+    sql(&ctx, "select rebac.sweep(0, 0, false)").await;
+    while loops::refresh_pass(&ctx, 4).await.unwrap() > 0 {}
 
     // FRESHNESS: every set the daemon projected carries when its lookup began, and Watch reports its own position.
     let c = ctx.pool.get().await.unwrap();
@@ -526,7 +728,7 @@ async fn the_daemon_end_to_end() {
     assert_eq!(unknown, 0, "the daemon stamps every lookup");
     let watched: bool = c
         .query_one(
-            "select watched_at is not null from rebac.watch_state where scope = 'watch'",
+            "select watched_at is not null from rebac.watch_state where scope = 'watch_applied'",
             &[],
         )
         .await

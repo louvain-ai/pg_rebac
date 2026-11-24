@@ -51,10 +51,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: tests/sql/run.sh
       # THE REVOCATION RACES, repeated: two sessions (dblink) race a refresh against a revocation in both orders, and
-      # a held lock fails the commit (fault injection). Deterministic by construction; repeated to catch a regression
+      # a held lock fails the commit (fault injection); 13 races one against a revocation applied from Watch. Deterministic by construction; repeated to catch a regression
       # that only loses sometimes.
       - name: revocation vs refresh races, 20 rounds
-        run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' || exit 1; done
+        run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' && tests/sql/run.sh '13_*' || exit 1; done
 
   integration:
     name: rebacd against SpiceDB

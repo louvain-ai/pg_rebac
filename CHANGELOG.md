@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased (0.2.0)
+
+- **Revocations made outside `rebac.write` are applied from Watch (G10).** Watch was observe-only; a delete written
+  straight to SpiceDB (another service, the `zed` CLI) waited for the sweep (15 minutes) or the freshness bound
+  (one hour). `rebacd` now applies each Watch message in one transaction with its position (`rebac.apply_watch`):
+  revocations are narrowed at once under the commit's lock order, arrow tuples and set grants are mirrored, and
+  everyone affected is refreshed fully consistent. Its own relayed writes are recognised by token and skipped.
+- **With Watch on, the heartbeat requires the stream.** While Watch is down or a message cannot be applied, reads fail
+  closed (`RB503`) after `max_staleness_ms`. A store that cannot serve Watch needs `watch = false`.
+- **A Watch position that cannot be resumed records a gap.** None stored, refused by SpiceDB, or older than
+  `watch_resume_max_age_ms` (new, one hour): the stream restarts from head, sets looked up before it are `RB503`
+  until re-projected, and the sweep is forced. **Upgrading from 0.1 records one gap on the first start** (0.1's
+  position applied nothing): reads are `RB503` until the forced sweep re-projects each principal.
+- **SQL:** `rebac.outbox.origin` (`write` or `watch`), `rebac.watch_state.gap_at`, `rebac.apply_watch`,
+  `rebac.watch_restarted`, `rebac.watch_alive`, `rebac.mirror`, `rebac.queue_refreshes`. A refresh queued fully
+  consistent (`zedtoken = ''`) stays so when a later enqueue carries a token. The sweep no longer re-sends a
+  revocation that a later change seen on Watch superseded.
+
 ## 0.1.1
 
 - **The relay's re-narrowing takes no tenant lock.** In 0.1.0 it held the tenant lock shared across its SpiceDB

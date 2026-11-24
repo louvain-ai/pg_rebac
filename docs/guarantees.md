@@ -29,7 +29,7 @@
    view revocation there with `RB422`. Grants are allowed at any isolation level.
 
    G2 for arrows, via relations and sets also needs `edge` and `set_grant` to be complete. Every such write must go
-   through `write`, or the tenant must have been backfilled.
+   through `write`, be seen on Watch (G10), or the tenant must have been backfilled.
 3. **G3, no regrowth.** No refresh can restore a container whose revocation is pending in the outbox. No refresh can
    restore anything for a retired principal.
 
@@ -58,10 +58,11 @@
    to SpiceDB's revision quantization older (`--datastore-revision-quantization-interval`, 5 s by default). Narrowing
    only removes rows and never moves the time.
 
-   G7 is the bound for what reaches SpiceDB WITHOUT `rebac.write` (another service, the `zed` CLI). Those changes are
-   picked up only by a re-projection, and the daemon's sweep re-projects everyone every `sweep_interval_ms`
-   (15 minutes by default), so keep the bound above the sweep interval plus the time a sweep takes to drain.
-   Revocations through `rebac.write` never wait on it (G2).
+   With `watch = false`, G7 is the bound for what reaches SpiceDB WITHOUT `rebac.write` (another service, the `zed`
+   CLI): those changes are picked up only by a re-projection, and the daemon's sweep re-projects everyone every
+   `sweep_interval_ms` (15 minutes by default), so keep the bound above the sweep interval plus the time a sweep takes
+   to drain. With Watch on (the default), G10 bounds them instead. Revocations through `rebac.write` never wait on
+   either (G2).
 
    **Liveness is separate.** `max_staleness_ms` (5 s) fails reads closed when the daemon has not heartbeated. A beat
    proves only that the daemon is running and can reach SpiceDB and Postgres. It says nothing about how current any
@@ -83,6 +84,48 @@
    other policy on the table. With `principal_source => 'session'`, a role without `EXECUTE` on
    `rebac.set_principal` cannot choose the principal, and needs no access to the projection itself.
 
+10. **G10, a revocation made outside `rebac.write` is in force within Watch's delivery, or reads fail closed.** With
+    `watch = true` (the default, live mode), the daemon follows SpiceDB's Watch over every type in the closure and
+    applies each message in ONE transaction that also records the stream's position (`rebac.apply_watch`):
+    - A DELETE of a closure relation that did not come through `rebac.write` is narrowed as G2 narrows a commit: the
+      same function (`narrow_seqs`), the same lock order (the tenant exclusively for an arrow tuple or a grant to a
+      subject set, then each principal), the same `narrow_lock_timeout_ms`. That covers direct relations, arrows, via
+      relations, memberships of subject sets and grants to them, with everything under a lost container through
+      self-arrows. A TOUCH carrying a caveat or an expiry is applied as a removal (the closure refuses both, so only a
+      schema change the daemon has not yet re-checked could produce one; G8). No other TOUCH can narrow a union.
+    - A TOUCH is a grant, and stays lazy: it is mirrored into `edge` and `set_grant` (so a later revocation through
+      either path finds it) and queues a refresh.
+    - Every principal narrowed, and every principal or resource the change names, is refreshed FULLY CONSISTENT. A
+      refresh claimed earlier at an older token re-reads its queue row under the principal's lock and looks up fully
+      consistent too, so no refresh can be served from a revision before the change (the window G3 leaves for
+      relayed deletes does not apply here).
+    - The daemon's own relayed writes are recognised and skipped: the same operation on the same relationship is in
+      the outbox either undelivered or delivered at the very token Watch reports.
+
+    **The bound.** While the stream is connected, a revocation made directly in SpiceDB leaves the projection within
+    the time SpiceDB's Watch takes to deliver it plus one `apply_watch` transaction. (Measured once in the integration
+    test, SpiceDB in memory on the same host: 26 to 50 ms from the WriteRelationships reply to the row being gone.
+    pg_rebac does not bound SpiceDB's delivery itself.) Otherwise reads fail closed:
+    - **The stream is down, or a message cannot be applied** (a lock not taken within `narrow_lock_timeout_ms`): the
+      daemon stops beating the heartbeat, so every read is `RB503` within `max_staleness_ms` (5 s), plus the
+      heartbeat's own SpiceDB deadline when the connection died silently (HTTP/2 keepalive ends such a stream within
+      10 s). The message is retried from the same position; nothing is half-applied.
+    - **On reconnect** the stream resumes from the position applied through, so a change made while it was down is
+      replayed and applied in order. The heartbeat resumes once the reopened stream has applied its first message;
+      the replayed changes after it are applied as fast as they arrive, and this window is not otherwise bounded.
+    - **A position that cannot be resumed**: none stored (a first start, or the first start after upgrading from
+      0.1, whose observe-only position applied nothing), one SpiceDB refuses (`INVALID_ARGUMENT`, `OUT_OF_RANGE`,
+      `FAILED_PRECONDITION`, `NOT_FOUND`), or one whose last confirmation is older than `watch_resume_max_age_ms`
+      (one hour). The age check exists because SpiceDB may resume from a revision past its garbage-collection window
+      without an error and silently skip what it collected (observed with the in-memory datastore and a 2 s window).
+      The stream restarts from SpiceDB's head and records `gap_at`: every principal looked up before it is `RB503`
+      until it is re-projected, and the sweep is forced at once to do that (`POST /lookup` re-projects one sooner).
+      `rebacd backfill` stores a position before it projects anything, so a daemon started after it needs no gap.
+
+    With several daemons, each applies Watch and each beats only while its own stream is applying; reads stay open
+    while any one of them beats. A store that cannot serve Watch fails every read closed with Watch on: set
+    `watch = false` there, and G7's sweep bound applies instead. In shadow mode Watch only counts.
+
 ## Not guaranteed
 
 - **RLS policies made by an earlier version stay permissive** until `rebac.enable_rls` is run again on the table.
@@ -94,10 +137,11 @@
 
 - **Grants are eventually consistent.** A grant shows up after relay delivery and a refresh. Until then a reader is
   briefly narrower, which is the one direction a fence may err.
-- **Writes not made through `rebac.write`** (another service, the `zed` CLI) are counted on Watch and narrowed by the
-  sweep only. G2 does not cover them.
+- **Writes not made through `rebac.write`** (another service, the `zed` CLI) are not in force at any commit of
+  yours: G10 bounds them by Watch's delivery, or, with `watch = false`, G7 by the sweep. G2 does not cover them.
 - **The "still held" rule** reads the outbox's net state, so it is exact only when every view relation is written
-  through `rebac.write`.
+  through `rebac.write` or seen on Watch. Where it is not exact it narrows too much, never too little, and the refresh
+  that follows restores the rest.
 - **Caveats, expiring relationships and exclusion** are refused at start, not evaluated.
 - **A read replica** holds G2 only once its replay has passed the commit.
 - **Projection rows written by anything but `rebac.project`** (an application's own mirror into `rebac.readable`) do

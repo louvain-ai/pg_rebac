@@ -113,6 +113,10 @@ impl SpiceDb {
         let channel = Endpoint::from_shared(endpoint.to_string())?
             .connect_timeout(Duration::from_secs(5))
             .tcp_keepalive(Some(Duration::from_secs(30)))
+            // A Watch stream on a dead connection must end, not hang: it is what keeps the heartbeat going.
+            .http2_keep_alive_interval(Duration::from_secs(5))
+            .keep_alive_timeout(Duration::from_secs(5))
+            .keep_alive_while_idle(true)
             .connect_lazy();
         let bearer = Bearer(format!("Bearer {token}").parse()?);
         Ok(Self {
