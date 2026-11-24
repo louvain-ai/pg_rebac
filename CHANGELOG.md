@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased: versions in Cargo.toml, META.json and npm are bumped at release)
+## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security
   (the fence in a policy, a naive `exists` policy, a per-row check function) and filtering after retrieval (fetch the
