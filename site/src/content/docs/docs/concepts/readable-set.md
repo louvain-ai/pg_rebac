@@ -74,7 +74,52 @@ back. `rebac.unretire` queues it for a fresh projection.
 
 ## Row-level security
 
-`rebac.enable_rls(table, container_column)` generates a policy that fences `select` on a table, with the principal
-read from a transaction-local setting (`rebac.principal` by default). It refuses a table the current role owns,
-since an owner bypasses row-level security, unless you pass `force => true`, which adds
-`FORCE ROW LEVEL SECURITY`.
+`rebac.enable_rls(table, container_column)` generates a policy that fences `select` on a table. It refuses a table
+the current role owns, since an owner bypasses row-level security, unless you pass `force => true`, which adds
+`FORCE ROW LEVEL SECURITY`. It governs reads only: inserts, updates and deletes follow your own policies and grants.
+
+### The policy is restrictive
+
+The fence is a `RESTRICTIVE` policy, so it is ANDed with every other policy on the table. No permissive policy can
+widen it, whether yours or added later. Postgres returns nothing through restrictive policies alone, so:
+
+- If the table has no permissive `SELECT` policy, `enable_rls` adds `rebac_base` (`using (true)`) beside the fence.
+  A permissive policy you add after that is ORed with `rebac_base`, so it no longer narrows anything. Write your own
+  narrowing as `RESTRICTIVE` too, or drop `rebac_base`.
+- If the table has permissive policies of its own, a row must pass one of them and the fence.
+
+A tenant filter of your own is unnecessary for the fence, since the set is per tenant. Add it as a restrictive
+policy if other access paths need it.
+
+### Who may choose the principal
+
+By default the policy reads the principal from a setting, `rebac.principal`. **Any role that can run SQL can set any
+setting to anything**, so this form is for an application role you trust to set it truthfully, after it
+authenticated the person. The same holds for `rebac.tenant`, and for calling `rebac.readable_set(p)` directly: a
+role with `EXECUTE` on it, or `SELECT` on `rebac.readable`, can read anyone's set.
+
+Where a role you do not trust can query the table, such as an analyst, a BI tool or SQL an agent wrote, bind the
+principal from a trusted role instead:
+
+```sql
+select rebac.enable_rls('passage', 'container', principal_source => 'session');
+
+-- the trusted role only
+grant execute on function rebac.set_principal(text, text) to app_trusted;
+-- the untrusted role: the policy's function, the table, nothing else in schema rebac
+grant usage on schema rebac to analyst;
+grant execute on function rebac.session_readable_set() to analyst;
+grant select on passage to analyst;
+
+-- the trusted role, in the transaction it hands over:
+select rebac.set_principal('acme', 'priya');
+```
+
+`rebac.set_principal` is `SECURITY DEFINER` and revoked from `PUBLIC`. It records the tenant and principal for this
+backend and this transaction, in a table no other role can write. The policy calls `rebac.session_readable_set()`,
+which runs as its owner, so the untrusted role needs no access to `rebac.readable`. The setting `rebac.principal` is
+ignored, a transaction with nothing bound is `RB400`, and changing `rebac.tenant` after binding is `RB422`. The
+binding ends with the transaction. `tests/sql/12_rls.sql` checks each of these.
+
+This form is not inlined into the plan: a `SECURITY DEFINER` function never is. Postgres evaluates the set once per
+query as a hashed subplan, so prefer the setting form, or the explicit fence, for planner-sensitive vector search.

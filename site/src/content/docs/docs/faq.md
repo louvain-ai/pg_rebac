@@ -28,7 +28,8 @@ this container", and for relationship-based access (groups, folders, workspace a
 permission service such as SpiceDB.
 
 pg_rebac supplies that answer as an indexed local table and a set Postgres inlines into the plan. You can use it
-through RLS: `rebac.enable_rls(table, column)` generates the policy, using the same set. Or apply the fence
+through RLS: `rebac.enable_rls(table, column)` generates a restrictive policy, using the same set. Whoever may
+choose the principal is spelled out in [row-level security](/docs/concepts/readable-set/#row-level-security). Or apply the fence
 explicitly in each query, as the examples do. The two compose: RLS decides where the fence is applied, pg_rebac
 decides what it holds.
 

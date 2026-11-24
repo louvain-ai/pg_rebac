@@ -69,7 +69,15 @@
    schema write in SpiceDB and the daemon noticing it (up to `closure_check_ms`, or the next start), reads run on the
    old closure; that window is the one this guarantee does not close.
 
+9. **G9, RLS cannot be widened.** The policy `rebac.enable_rls` generates is `RESTRICTIVE`, so it is ANDed with every
+   other policy on the table. With `principal_source => 'session'`, a role without `EXECUTE` on
+   `rebac.set_principal` cannot choose the principal, and needs no access to the projection itself.
+
 ## Not guaranteed
+
+- **The principal setting is trusted input.** With the default `principal_source => 'setting'`, and for any direct
+  call of `rebac.readable_set(p)`, whoever can run SQL chooses the principal. Use that form only for an application
+  role that sets it after authenticating the person.
 
 - **Grants are eventually consistent.** A grant shows up after relay delivery and a refresh. Until then a reader is
   briefly narrower, which is the one direction a fence may err.

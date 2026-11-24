@@ -875,16 +875,74 @@ language sql stable as $$
   group by s.tenant
 $$;
 
--- Generate a row-level-security policy that fences reads of `tbl` on `container_column`, the principal read from a
--- transaction-local setting. Refuses a table the current role owns (an owner bypasses RLS) unless force => true,
--- which adds FORCE ROW LEVEL SECURITY.
+-- THE PRINCIPAL, BOUND BY A TRUSTED ROLE. `rebac.principal` is an ordinary setting: any role that can run SQL can set
+-- it to anyone. Where a role that is NOT trusted can query a fenced table (an analyst, a BI tool, SQL an agent wrote),
+-- bind the principal instead with rebac.set_principal, which only roles granted EXECUTE can call, and fence with
+-- `principal_source => 'session'`. The binding is held in a table no other role can write, keyed by this backend and
+-- this transaction, so it ends with the transaction.
+create unlogged table if not exists rebac.session_principal (
+  pid       integer not null,
+  xact      xid8 not null,
+  tenant    text not null,
+  principal text not null,
+  primary key (pid, xact)
+);
+revoke all on rebac.session_principal from public;
+
+create or replace function rebac.set_principal(t text, p text) returns void
+language plpgsql volatile security definer set search_path = pg_catalog, pg_temp as $$
+begin
+  if t is null or t = '' or p is null or p = '' then
+    raise exception 'rebac.set_principal: a tenant and a principal are required' using errcode = 'RB400';
+  end if;
+  delete from rebac.session_principal where pid = pg_backend_pid();
+  insert into rebac.session_principal (pid, xact, tenant, principal)
+  values (pg_backend_pid(), pg_current_xact_id(), t, p);
+  perform set_config('rebac.tenant', t, true);
+end $$;
+revoke all on function rebac.set_principal(text, text) from public;
+
+-- The bound principal's readable set, for a policy. Runs as its owner, so the querying role needs no access to
+-- rebac.readable or rebac.readable_set (and must not have it: with it, it could read anyone's set directly).
+-- Not inlined (a SECURITY DEFINER function never is): the policy evaluates it once per query, as a hashed subplan.
+create or replace function rebac.session_readable_set() returns setof text
+language plpgsql volatile security definer set search_path = pg_catalog, pg_temp as $$
+declare b rebac.session_principal;
+begin
+  select * into b from rebac.session_principal
+  where pid = pg_backend_pid() and xact = pg_current_xact_id_if_assigned();
+  if not found then
+    raise exception 'rebac: no principal is bound to this transaction' using errcode = 'RB400',
+      hint = 'a trusted role calls rebac.set_principal(tenant, principal) first';
+  end if;
+  if coalesce(current_setting('rebac.tenant', true), '') <> b.tenant then
+    raise exception 'rebac: rebac.tenant was changed after the principal was bound' using errcode = 'RB422';
+  end if;
+  return query select * from rebac.readable_set(b.principal);
+end $$;
+revoke all on function rebac.session_readable_set() from public;
+
+-- Generate a row-level-security policy that fences reads of `tbl` on `container_column`.
+--   * RESTRICTIVE: it is ANDed with every other policy on the table, so no permissive policy (an application's own,
+--     added before or after) can widen it. Postgres returns nothing through restrictive policies alone, so when the
+--     table has no permissive SELECT policy, a permissive `rebac_base` (true) is added beside it; with permissive
+--     policies of your own, rows must pass one of them AND the fence.
+--   * principal_source 'setting' (the default) reads the principal from `principal_setting` (rebac.principal): for
+--     a role you trust to set it truthfully. 'session' reads the one bound by rebac.set_principal.
+-- Refuses a table the current role owns (an owner bypasses RLS) unless force => true, which adds FORCE ROW LEVEL
+-- SECURITY. SELECT only: writes to `tbl` are governed by your own policies and grants.
+drop function if exists rebac.enable_rls(regclass, text, text, boolean);
 create or replace function rebac.enable_rls(tbl regclass, container_column text,
                                             principal_setting text default 'rebac.principal',
-                                            force boolean default false)
+                                            force boolean default false,
+                                            principal_source text default 'setting')
 returns void
 language plpgsql volatile as $$
 declare owner_name name;
 begin
+  if principal_source not in ('setting', 'session') then
+    raise exception 'rebac.enable_rls: principal_source is setting or session' using errcode = 'RB422';
+  end if;
   select pg_get_userbyid(relowner) into owner_name from pg_class where oid = tbl::regclass;
   if owner_name = current_user and not force then
     raise exception 'rebac.enable_rls: % is owned by %, which bypasses row-level security', tbl, owner_name
@@ -893,9 +951,20 @@ begin
   execute format('alter table %s enable row level security', tbl);
   if force then execute format('alter table %s force row level security', tbl); end if;
   execute format('drop policy if exists rebac_read on %s', tbl);
-  execute format(
-    'create policy rebac_read on %s for select using (%I in (select * from rebac.readable_set(current_setting(%L))))',
-    tbl, container_column, principal_setting);
+  if principal_source = 'setting' then
+    execute format(
+      'create policy rebac_read on %s as restrictive for select using (%I in (select * from rebac.readable_set(current_setting(%L))))',
+      tbl, container_column, principal_setting);
+  else
+    execute format(
+      'create policy rebac_read on %s as restrictive for select using (%I in (select * from rebac.session_readable_set()))',
+      tbl, container_column);
+  end if;
+  if not exists (select 1 from pg_policy where polrelid = tbl and polpermissive and polcmd in ('r', '*')
+                   and polname <> 'rebac_base') then
+    execute format('drop policy if exists rebac_base on %s', tbl);
+    execute format('create policy rebac_base on %s as permissive for select using (true)', tbl);
+  end if;
 end $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
