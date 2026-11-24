@@ -60,11 +60,19 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // REBACD_LOG_FORMAT=json: one JSON object a line (for a log pipeline that reads fields); otherwise text.
+    let filter =
+        || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if std::env::var("REBACD_LOG_FORMAT").as_deref() == Ok("json") {
+        tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_ansi(false)
+            .with_env_filter(filter())
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter()).init();
+    }
     let cli = Cli::parse();
     let mut config = Config::load(cli.config.as_deref())?;
     match cli.cmd {

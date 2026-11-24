@@ -62,7 +62,11 @@ async fn lookup(
             }),
         ),
         Err(e) => {
-            tracing::warn!(error = %e, "lazy lookup failed");
+            let kind = match &e {
+                project::ProjectError::Unavailable(st) => format!("grpc:{:?}", st.code()),
+                project::ProjectError::Db(err) => crate::logs::kind_of(err),
+            };
+            tracing::warn!(error = %kind, "lazy lookup failed");
             if let Ok(c) = ctx.pool.get().await {
                 let _ = c
                     .execute(

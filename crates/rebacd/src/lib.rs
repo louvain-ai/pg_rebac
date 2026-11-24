@@ -21,6 +21,7 @@ pub mod closure;
 pub mod config;
 pub mod db;
 pub mod http;
+pub mod logs;
 pub mod loops;
 pub mod project;
 pub mod relay;

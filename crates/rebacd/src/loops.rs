@@ -25,7 +25,7 @@ pub async fn relay_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
             Err(e) => {
                 failures += 1;
                 if failures == 1 {
-                    tracing::error!(error = %e, "relay pass failed");
+                    tracing::error!(error = %crate::logs::kind_of(&e), "relay pass failed");
                 }
                 backoff(failures, idle)
             }
@@ -42,7 +42,7 @@ pub async fn refresh_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
         let worked = match refresh_pass(&ctx, n).await {
             Ok(w) => w,
             Err(e) => {
-                tracing::error!(error = %e, "refresh pass failed");
+                tracing::error!(error = %crate::logs::kind_of(&e), "refresh pass failed");
                 0
             }
         };
@@ -90,7 +90,7 @@ pub async fn refresh_pass(ctx: &Ctx, concurrency: usize) -> anyhow::Result<usize
                 }
             };
             if let Err(e) = r {
-                tracing::error!(error = %e, "could not record a refresh outcome");
+                tracing::error!(error = %crate::logs::kind(&e), "could not record a refresh outcome");
             }
         })
         .await;
@@ -151,7 +151,7 @@ pub async fn sweep_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
         match r {
             Ok((0, 0)) => {}
             Ok((requeued, principals)) => tracing::info!(requeued, principals, "permission sweep"),
-            Err(e) => tracing::error!(error = %e, "permission sweep failed"),
+            Err(e) => tracing::error!(error = %crate::logs::kind_of(&e), "permission sweep failed"),
         }
     }
 }
@@ -199,7 +199,7 @@ pub async fn watch_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
         failures += 1;
         if let Err(e) = r {
             if failures == 1 {
-                tracing::warn!(error = %e, "watch stream ended; reconnecting");
+                tracing::warn!(error = %crate::logs::kind_of(&e), "watch stream ended; reconnecting");
             }
         }
         tokio::select! { _ = tokio::time::sleep(backoff(failures, Duration::from_millis(500))) => {}, _ = stop.changed() => {} }
