@@ -47,6 +47,8 @@ pub struct Config {
     pub sweep_interval_ms: i64,
     pub sweep_settle_ms: i64,
     pub watch: bool,
+    /// How often the live schema is re-read to re-derive the closure (besides Watch's schema notices).
+    pub closure_check_ms: u64,
 }
 
 impl Default for Config {
@@ -73,6 +75,7 @@ impl Default for Config {
             sweep_interval_ms: 15 * 60_000,
             sweep_settle_ms: 5 * 60_000,
             watch: true,
+            closure_check_ms: 10_000,
         }
     }
 }

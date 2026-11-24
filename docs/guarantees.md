@@ -61,6 +61,14 @@
    **On upgrade**, rows written before `looked_up_at` existed have no lookup time. They read as `RB503` until the sweep
    re-projects them (or `POST /lookup` re-projects one). `rebac.status()` counts them as `unfresh_principals`.
 
+8. **G8, the closure matches the live schema.** The daemon re-derives the closure whenever SpiceDB's schema text
+   changes: on Watch's notice, and by re-reading it every `closure_check_ms` (10 s). A change to what grants view
+   marks `rebac.closure_state` invalid in the same transaction that stores the new list, so every read is `RB503`
+   until every tenant's mirrors are re-read and its principals re-projected. After that, a principal looked up before
+   the change stays `RB503` until it is re-projected. An unsupported closure keeps every read `RB503`. Between a
+   schema write in SpiceDB and the daemon noticing it (up to `closure_check_ms`, or the next start), reads run on the
+   old closure; that window is the one this guarantee does not close.
+
 ## Not guaranteed
 
 - **Grants are eventually consistent.** A grant shows up after relay delivery and a refresh. Until then a reader is

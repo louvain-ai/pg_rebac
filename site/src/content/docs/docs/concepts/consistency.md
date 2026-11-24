@@ -109,6 +109,7 @@ an upgrade have no lookup time, and read as `RB503` until the sweep re-projects 
 | G5 | Every key carries the tenant. A reference with another tenant's prefix is refused by `rebac.write`, maps to nobody, and is dropped from a lookup. |
 | G6 | An unknown principal, a missing tenant, a daemon that is not live, a set too old or of unknown age, an unavailable lookup and an over-cap set each raise. None is an empty set, or a wider one. |
 | G7 | A set is read only while the SpiceDB lookup behind it began within `max_projection_age_ms`. Liveness is a separate bound. |
+| G8 | A change to what grants view in the live schema fails every read closed until every tenant is rebuilt under the new closure, and each principal looked up before it until it is re-projected. Noticed within `closure_check_ms` (10 s). |
 
 ## Not guaranteed
 

@@ -4,13 +4,40 @@ use crate::Ctx;
 use rebac_schema::{closure, parse, ViewRelation};
 
 pub async fn derive(ctx: &Ctx) -> anyhow::Result<Vec<ViewRelation>> {
+    match derive_checked(ctx).await? {
+        Derived::Supported(d) => Ok(d),
+        Derived::Unsupported(why) => anyhow::bail!("{why}"),
+    }
+}
+
+/// What the live schema's closure is: a list the daemon can narrow soundly, or a refusal (its reason). An `Err` is
+/// SpiceDB not answering, which says nothing about the schema.
+pub enum Derived {
+    Supported(Vec<ViewRelation>),
+    Unsupported(String),
+}
+
+pub async fn derive_checked(ctx: &Ctx) -> anyhow::Result<Derived> {
     let text = ctx.spicedb.read_schema(ctx.config.deadline()).await?;
-    let schema = parse(&text)?;
-    Ok(closure(
+    Ok(derive_text(ctx, &text))
+}
+
+pub fn derive_text(ctx: &Ctx, text: &str) -> Derived {
+    let schema = match parse(text) {
+        Ok(s) => s,
+        Err(e) => return Derived::Unsupported(format!("the schema does not parse: {e}")),
+    };
+    match closure(
         &schema,
         &ctx.projection.resource_type,
         &ctx.projection.permission,
-    )?)
+    ) {
+        Ok(mut d) => {
+            d.sort();
+            Derived::Supported(d)
+        }
+        Err(e) => Derived::Unsupported(e.to_string()),
+    }
 }
 
 pub async fn stored(
@@ -58,31 +85,166 @@ pub async fn write(
     Ok(())
 }
 
-/// At start: an empty table is filled; a table that differs from the schema refuses the start, because a relation
-/// missing from it is a grant that never refreshes or a revocation that never narrows.
-pub async fn check_at_start(ctx: &Ctx, accept: bool) -> anyhow::Result<()> {
-    let derived = derive(ctx).await?;
-    let mut db = ctx.pool.get().await?;
-    let have = stored(&db).await?;
-    if have.is_empty() || (accept && have != derived) {
-        write(&mut db, &derived).await?;
-        if !have.is_empty() {
-            db.execute(
-                "update rebac.sweep_claim set last_at = now() - interval '1 year'",
-                &[],
+async fn closure_invalid(db: &impl deadpool_postgres::GenericClient) -> anyhow::Result<bool> {
+    Ok(db
+        .query_opt("select state = 'invalid' from rebac.closure_state", &[])
+        .await?
+        .map(|r| r.get::<_, bool>(0))
+        .unwrap_or(false))
+}
+
+async fn invalidate(ctx: &Ctx, why: &str) -> anyhow::Result<()> {
+    let why: String = why.chars().take(200).collect();
+    ctx.pool
+        .get()
+        .await?
+        .execute("select rebac.invalidate_closure($1)", &[&why])
+        .await?;
+    Ok(())
+}
+
+/// THE REBUILD after the closure changed. In one transaction the new list is stored and the closure marked invalid,
+/// so every read fails closed (RB503) from the moment the stored list stops matching what it was built from. Then,
+/// per tenant, the mirrors are pruned of relations that no longer grant view and re-read from SpiceDB, and every
+/// principal is re-projected (`backfill`). Only when every tenant succeeded is the closure valid again; a principal
+/// whose lookup began before the change still fails closed until it is re-projected (`rebac.checked`).
+pub async fn rebuild(ctx: &Ctx, rels: &[ViewRelation], why: &str) -> anyhow::Result<()> {
+    {
+        let mut db = ctx.pool.get().await?;
+        let tx = db.transaction().await?;
+        tx.execute("delete from rebac.view_relation", &[]).await?;
+        for r in rels {
+            tx.execute(
+                "insert into rebac.view_relation (resource_type, relation, kind, target_type, through) values ($1, $2, $3, $4, $5)",
+                &[&r.resource_type, &r.relation, &r.kind.as_str(), &r.target_type, &r.through],
             )
             .await?;
-            tracing::warn!("rebac.view_relation replaced from the schema; every principal will be re-projected");
         }
+        let why: String = why.chars().take(200).collect();
+        tx.execute("select rebac.invalidate_closure($1)", &[&why])
+            .await?;
+        // Mirrored tuples of relations that no longer grant view narrow nothing now; drop them.
+        tx.batch_execute(
+            "delete from rebac.edge e where not exists (select 1 from rebac.view_relation v
+               where v.kind = 'arrow' and v.relation = e.relation and v.resource_type = rebac.setting('resource_type'));
+             delete from rebac.set_grant g where not exists (select 1 from rebac.view_relation v
+               where v.kind = 'direct' and v.relation = g.relation and v.resource_type = rebac.setting('resource_type'));",
+        )
+        .await?;
+        tx.commit().await?;
+    }
+    tracing::warn!(
+        relations = rels.len(),
+        "the closure changed: reads fail closed while every tenant is rebuilt"
+    );
+    let tenants: Vec<String> = ctx
+        .pool
+        .get()
+        .await?
+        .query(
+            "select tenant from rebac.principal_state union select tenant from rebac.subject
+             union select tenant from rebac.edge union select tenant from rebac.set_grant order by 1",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let mut failed = 0usize;
+    for t in &tenants {
+        match crate::backfill::backfill(ctx, t).await {
+            Ok(b) => failed += b.failed,
+            Err(e) => {
+                tracing::error!(error = %crate::logs::kind_of(&e), "a tenant's rebuild failed");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("the rebuild left {failed} principals or tenants unprojected; the closure stays invalid");
+    }
+    ctx.pool
+        .get()
+        .await?
+        .execute("select rebac.accept_closure()", &[])
+        .await?;
+    // The sweep re-projects everyone again soon after; Watch reopens on the new types.
+    ctx.pool
+        .get()
+        .await?
+        .execute(
+            "update rebac.sweep_claim set last_at = now() - interval '1 year'",
+            &[],
+        )
+        .await?;
+    tracing::info!(tenants = tenants.len(), "the closure is rebuilt");
+    Ok(())
+}
+
+/// What a re-check of the live schema found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recheck {
+    Unchanged,
+    Rebuilt,
+    Unsupported,
+}
+
+/// Re-derive the closure from the live schema (on a schema change, and periodically). Unsupported: reads fail closed
+/// until it is supported again. Different from the stored list, or invalid from before: rebuild.
+pub async fn recheck(ctx: &Ctx) -> anyhow::Result<Recheck> {
+    match derive_checked(ctx).await? {
+        Derived::Unsupported(why) => {
+            if !closure_invalid(&ctx.pool.get().await?).await? {
+                tracing::error!("the SpiceDB schema's closure is unsupported: reads fail closed");
+            }
+            invalidate(ctx, &format!("unsupported: {why}")).await?;
+            Ok(Recheck::Unsupported)
+        }
+        Derived::Supported(derived) => {
+            let db = ctx.pool.get().await?;
+            let have = stored(&db).await?;
+            let invalid = closure_invalid(&db).await?;
+            drop(db);
+            if have == derived && !invalid {
+                return Ok(Recheck::Unchanged);
+            }
+            rebuild(ctx, &derived, "schema_changed").await?;
+            Ok(Recheck::Rebuilt)
+        }
+    }
+}
+
+/// At start: an empty table is filled; a table that differs from the schema refuses the start (and the closure is
+/// marked invalid, so reads fail closed), because a relation missing from it is a grant that never refreshes or a
+/// revocation that never narrows. `accept` rebuilds instead; so does a closure left invalid by an earlier run.
+pub async fn check_at_start(ctx: &Ctx, accept: bool) -> anyhow::Result<()> {
+    let derived = match derive_checked(ctx).await? {
+        Derived::Supported(d) => d,
+        Derived::Unsupported(why) => {
+            invalidate(ctx, &format!("unsupported: {why}")).await?;
+            anyhow::bail!("the SpiceDB schema cannot be projected soundly: {why}");
+        }
+    };
+    let mut db = ctx.pool.get().await?;
+    let have = stored(&db).await?;
+    let invalid = closure_invalid(&db).await?;
+    if have.is_empty() && !invalid {
+        write(&mut db, &derived).await?;
         return Ok(());
     }
-    if have != derived {
+    if have != derived && !accept {
+        drop(db);
+        invalidate(ctx, "schema_changed_unaccepted").await?;
         anyhow::bail!(
             "rebac.view_relation does not match the SpiceDB schema ({} rows stored, {} derived); \
              run `rebacd closure --write` or start with --accept-schema",
             have.len(),
             derived.len()
         );
+    }
+    if have != derived || invalid {
+        drop(db);
+        rebuild(ctx, &derived, "schema_changed").await?;
     }
     Ok(())
 }

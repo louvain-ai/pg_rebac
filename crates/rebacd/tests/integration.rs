@@ -124,6 +124,10 @@ async fn the_daemon_end_to_end() {
     let s = SpiceDb::connect(&endpoint, KEY, rebacd::config::Consistency::FullyConsistent)
         .await
         .unwrap();
+    // A store left by an earlier run may hold tuples the schema below drops: clear them first (best effort).
+    for ty in ["container", "workspace", "group"] {
+        let _ = s.delete_all(ty, Duration::from_secs(5)).await;
+    }
     s.write_schema(SCHEMA, Duration::from_secs(5))
         .await
         .unwrap();
@@ -529,4 +533,118 @@ async fn the_daemon_end_to_end() {
         .unwrap()
         .get(0);
     assert!(watched, "Watch records when it last heard from SpiceDB");
+    drop(c);
+
+    // LIVE SCHEMA CHANGES. A new relation that grants view: the closure is re-derived, every tenant rebuilt, and the
+    // grant it carries is projected.
+    let with_viewer = SCHEMA.replace(
+        "relation editor: user\n  permission view = member + editor",
+        "relation editor: user\n  relation viewer: user\n  permission view = member + editor + viewer",
+    );
+    assert_ne!(with_viewer, SCHEMA);
+    s.write_schema(&with_viewer, Duration::from_secs(5))
+        .await
+        .unwrap();
+    s.write(
+        &[op(true, "container:acme/vdoc", "viewer", "user:acme/ana")],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        closure::recheck(&ctx).await.unwrap(),
+        closure::Recheck::Rebuilt
+    );
+    let c = ctx.pool.get().await.unwrap();
+    let row = c
+        .query_one(
+            "select state, (select count(*) from rebac.view_relation where relation = 'viewer') from rebac.closure_state",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "valid", "rebuilt, valid again");
+    assert_eq!(row.get::<_, i64>(1), 1, "the new relation is in the closure");
+    assert!(
+        set_of(&ctx, "acme", "ana").await.contains(&"vdoc".to_string()),
+        "the rebuild projected the new relation's grant"
+    );
+    assert_eq!(
+        closure::recheck(&ctx).await.unwrap(),
+        closure::Recheck::Unchanged
+    );
+
+    // An unsupported schema (exclusion: removing a tuple can grant) fails every read closed until it is fixed.
+    let excluding = with_viewer.replace(
+        "relation viewer: user\n",
+        "relation viewer: user\n  relation banned: user\n",
+    )
+    .replace("+ parent->view", "+ parent->view - banned");
+    s.write_schema(&excluding, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        closure::recheck(&ctx).await.unwrap(),
+        closure::Recheck::Unsupported
+    );
+    c.batch_execute("select rebac.heartbeat('*')").await.unwrap();
+    let err = c
+        .batch_execute("set rebac.tenant = 'acme'; select * from rebac.readable_set('ana')")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code().map(|c| c.code()),
+        Some("RB503"),
+        "an unsupported closure is RB503"
+    );
+
+    // The closure loop notices on its own (no Watch here), and rebuilds once the schema is supported again.
+    let loop_ctx = std::sync::Arc::new(
+        Ctx::connect(Config {
+            closure_check_ms: 200,
+            ..config("REBAC_IT_DB", &endpoint, Mode::Live)
+        })
+        .await
+        .unwrap(),
+    );
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let cl = tokio::spawn(loops::closure_loop(loop_ctx.clone(), stop));
+    // SpiceDB refuses to drop a relation that still has tuples.
+    s.write(
+        &[op(false, "container:acme/vdoc", "viewer", "user:acme/ana")],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    s.write_schema(SCHEMA, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let mut valid = false;
+    for _ in 0..200 {
+        let st: String = c
+            .query_one("select state from rebac.closure_state", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let viewer: i64 = c
+            .query_one(
+                "select count(*) from rebac.view_relation where relation = 'viewer'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if st == "valid" && viewer == 0 {
+            valid = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop_tx.send(true).unwrap();
+    cl.await.unwrap();
+    assert!(valid, "the closure loop re-derived and rebuilt after the schema was fixed");
+    assert!(
+        !set_of(&ctx, "acme", "ana").await.contains(&"vdoc".to_string()),
+        "the relation that left the closure no longer grants"
+    );
 }

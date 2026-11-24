@@ -112,6 +112,18 @@ create table if not exists rebac.view_relation (
   primary key (resource_type, relation)
 );
 
+-- THE CLOSURE'S STATE, for the whole deployment (rebac.view_relation is deployment-wide). The daemon re-derives the
+-- closure whenever SpiceDB's schema changes. 'invalid' while the live schema's closure is unsupported, or differs from
+-- the stored one and the mirrors (edge, set_grant) and projections have not been rebuilt: every read fails closed
+-- (RB503). After a rebuild it is 'valid' again, and `changed_at` stays: a principal whose lookup began before it
+-- still fails closed until it is re-projected. No row is the state before any daemon has checked: valid.
+create table if not exists rebac.closure_state (
+  id         boolean primary key default true check (id),
+  state      text not null check (state in ('valid', 'invalid')),
+  reason     text,
+  changed_at timestamptz not null default now()
+);
+
 -- Local copy of arrow tuples (child#relation@parent), so narrowing works with SpiceDB and the daemon down.
 create table if not exists rebac.edge (
   tenant   text not null,
@@ -295,6 +307,7 @@ declare
   bound bigint := coalesce(rebac.setting('max_staleness_ms'), '0')::bigint;
   age bigint := coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint;
   beat timestamptz;
+  cl rebac.closure_state;
   st rebac.principal_state;
 begin
   if p is null or p = '' then
@@ -307,6 +320,13 @@ begin
       raise exception 'rebac: the daemon is not live (no heartbeat within % ms)', bound
         using errcode = 'RB503', hint = 'rebac_stale: check that rebacd is running and can reach SpiceDB';
     end if;
+  end if;
+  -- THE CLOSURE: a schema change that alters what can grant view makes every set suspect until it is rebuilt.
+  select * into cl from rebac.closure_state;
+  if found and cl.state = 'invalid' then
+    raise exception 'rebac: the SpiceDB schema changed what grants view (%); reads wait for the rebuild',
+      coalesce(cl.reason, 'unknown')
+      using errcode = 'RB503', hint = 'rebac_closure: rebacd re-derives the closure and rebuilds; see rebac.closure_state';
   end if;
   select * into st from rebac.principal_state where tenant = t and principal = p;
   if found then
@@ -322,6 +342,10 @@ begin
         raise exception 'rebac: the projection of this principal is older than % ms, or of unknown age', age
           using errcode = 'RB503',
                 hint = 'rebac_not_fresh: the daemon''s sweep re-projects everyone; POST /lookup re-projects one now';
+      end if;
+      if cl.changed_at is not null and st.looked_up_at < cl.changed_at then
+        raise exception 'rebac: this principal was projected before the schema''s closure last changed'
+          using errcode = 'RB503', hint = 'rebac_closure: it is re-projected by the rebuild, the sweep or POST /lookup';
       end if;
       if st.n_containers > 0 then return true; end if;
       if exists (select 1 from rebac.readable_empty e where e.tenant = t and e.principal = p
@@ -1104,4 +1128,18 @@ create or replace function rebac.heartbeat(sc text default '*') returns void
 language sql volatile as $$
   insert into rebac.watch_state (scope, heartbeat_at) values (sc, now())
   on conflict (scope) do update set heartbeat_at = now()
+$$;
+
+-- The daemon's closure transitions. INVALIDATE: reads fail closed from now on. ACCEPT: the rebuild is done; the
+-- principals projected before `changed_at` still fail closed one by one until each is re-projected.
+create or replace function rebac.invalidate_closure(why text) returns void
+language sql volatile as $$
+  insert into rebac.closure_state (id, state, reason, changed_at) values (true, 'invalid', why, now())
+  on conflict (id) do update set state = 'invalid', reason = excluded.reason, changed_at = now()
+$$;
+
+create or replace function rebac.accept_closure() returns void
+language sql volatile as $$
+  insert into rebac.closure_state (id, state, reason, changed_at) values (true, 'valid', null, '-infinity')
+  on conflict (id) do update set state = 'valid', reason = null
 $$;

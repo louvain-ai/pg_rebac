@@ -60,7 +60,8 @@ until you accept it ([rebacd](/docs/rebacd/#the-schema-at-start)). `rebacd verif
 
 The rule underneath: narrowing on a delete is sound only if removing a tuple can never add access. Anything that
 breaks that, or that cannot be evaluated from tuples alone, is refused when the daemon starts, with every reason
-listed. A refusal is not a claim that the schema is wrong, only that pg_rebac cannot project it soundly yet.
+listed. A schema changed to such a construct while the daemon runs fails every read closed (`RB503`) until it is
+supported again ([schema changes while running](/docs/rebacd/#schema-changes-while-running)). A refusal is not a claim that the schema is wrong, only that pg_rebac cannot project it soundly yet.
 
 | Construct | Reason |
 |---|---|

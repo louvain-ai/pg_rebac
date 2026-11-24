@@ -106,7 +106,9 @@ Slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tes
   - re-sends each recent revocation once from a sweep;
   - follows Watch to count writes made outside pg_rebac (observe-only in slice 1);
   - derives the relations that can change the permission from the SpiceDB schema itself, and refuses a schema it
-    cannot narrow soundly.
+    cannot narrow soundly;
+  - re-derives them whenever the live schema changes: a change to what grants view fails every read closed
+    (`RB503`) until every tenant has been rebuilt under the new closure.
 - **`rebacd verify`.** It diffs the projection against SpiceDB, across tenants, against the schema's closure, or
   against a shadow projection. It reports extra rows (a violation, exit 2) and missing rows (freshness) separately,
   as counts only.
