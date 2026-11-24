@@ -40,6 +40,9 @@ The SQL is installed separately, with `psql` or your migrations. No published im
   affects is refreshed fully consistent; a grant queues a refresh. While the stream is down or a message cannot be
   applied, the heartbeat stops, so reads fail closed.
   A schema change on the stream starts a closure re-check at once, and the stream reopens on the new closure's types.
+  A reopened stream replays what happened while it was down, and reads stay closed until the whole replay is applied:
+  the daemon touches a marker relationship (`<resource_type>:__rebac_watch_marker`) when the stream opens, and counts
+  the stream current only once Watch delivers that marker.
 - **Closure.** Re-reads the live schema every `closure_check_ms` (10 seconds), and at once on Watch's notice, so a
   schema change is caught with `watch = false` too. See [schema changes while running](#schema-changes-while-running).
 - **HTTP.** `POST /lookup`, `GET /healthz` and `GET /status` on `listen`.
@@ -56,6 +59,7 @@ spicedb_token_env = "SPICEDB_TOKEN"      # the NAME of the variable holding the 
 consistency       = "at_least_as_fresh"  # or "fully_consistent"
 mode              = "live"               # or "shadow"
 listen            = "127.0.0.1:7341"
+lookup_token_env  = "REBACD_LOOKUP_TOKEN" # optional: the NAME of the variable holding the bearer token /lookup needs
 watch             = true
 ```
 
@@ -157,6 +161,19 @@ curl -X POST localhost:7341/lookup -H 'content-type: application/json' \
 
 The answer is written down, an empty one included. If SpiceDB cannot answer, the reply is a 503, the principal is
 marked unavailable (`RB503` on the next read, never an empty set) and queued for retry.
+
+The reply names how many containers the principal reads, and any caller can make the daemon ask SpiceDB. So
+`POST /lookup` and `GET /status` are for your application only:
+
+- `listen` defaults to loopback (`127.0.0.1:7341`).
+- With `lookup_token_env` set, both require `Authorization: Bearer <token>`, compared in constant time; anything else
+  is a 401 that asks SpiceDB nothing. `GET /healthz` needs no token.
+- On any other address without a token, the daemon logs a warning at start.
+
+```sh
+curl -X POST localhost:7341/lookup -H "authorization: Bearer $REBACD_LOOKUP_TOKEN" \
+  -H 'content-type: application/json' -d '{"tenant": "acme", "principal": "priya"}'
+```
 
 ## TLS to Postgres
 

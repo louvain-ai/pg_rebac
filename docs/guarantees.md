@@ -115,8 +115,13 @@
       heartbeat's own SpiceDB deadline when the connection died silently (HTTP/2 keepalive ends such a stream within
       10 s). The message is retried from the same position; nothing is half-applied.
     - **On reconnect** the stream resumes from the position applied through, so a change made while it was down is
-      replayed and applied in order. The heartbeat resumes once the reopened stream has applied its first message;
-      the replayed changes after it are applied as fast as they arrive, and this window is not otherwise bounded.
+      replayed and applied in order. Reads stay closed through the WHOLE replay: once the stream is open, the daemon
+      touches a marker relationship (`<resource_type>:__rebac_watch_marker`, on a direct relation of the projected
+      type, subject `<subject_type>:__rebac_watch_marker`), and the stream counts as current, and the heartbeat
+      resumes, only when Watch delivers the marker's own revision. Watch delivers in revision order, so by then every
+      change committed before the stream reopened has been applied. A marker not delivered within six times
+      `deadline_ms` reopens the stream. The marker carries no tenant prefix and is dropped before `rebac.apply_watch`,
+      so it grants nobody anything; the projected relation must accept `<subject_type>` directly.
     - **A position that cannot be resumed**: none stored (a first start, or the first start after upgrading from
       0.1, whose observe-only position applied nothing), one SpiceDB refuses (`INVALID_ARGUMENT`, `OUT_OF_RANGE`,
       `FAILED_PRECONDITION`, `NOT_FOUND`), or one whose last confirmation is older than `watch_resume_max_age_ms`

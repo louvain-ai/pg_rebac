@@ -326,6 +326,48 @@ pub async fn ensure_watch_position(ctx: &Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The object id of the marker relationship the Watch loop touches to learn where a replay ends. It carries no tenant
+/// prefix, so it maps to nobody (G5); the loop also drops it before `rebac.apply_watch` sees it.
+pub const WATCH_MARKER: &str = "__rebac_watch_marker";
+
+/// Touch `<resource_type>:__rebac_watch_marker#<a direct relation>@<subject_type>:__rebac_watch_marker` and return the
+/// token SpiceDB wrote it at. A TOUCH of an unchanged relationship still writes a revision, and Watch reports it.
+async fn write_marker(ctx: &Ctx) -> anyhow::Result<String> {
+    let p = &ctx.projection;
+    let rel: Option<String> = ctx
+        .pool
+        .get()
+        .await?
+        .query_opt(
+            "select relation from rebac.view_relation where resource_type = $1 and kind = 'direct' order by relation limit 1",
+            &[&p.resource_type],
+        )
+        .await?
+        .map(|r| r.get(0));
+    let rel = rel.ok_or_else(|| {
+        anyhow::anyhow!(
+            "the closure names no direct relation on {} for the Watch marker",
+            p.resource_type
+        )
+    })?;
+    let op = crate::spicedb::TupleOp {
+        touch: true,
+        resource: format!("{}:{WATCH_MARKER}", p.resource_type),
+        relation: rel.clone(),
+        subject: format!("{}:{WATCH_MARKER}", p.subject_type),
+    };
+    ctx.spicedb
+        .write(&[op], ctx.config.deadline())
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "SpiceDB refused the Watch marker {}:{WATCH_MARKER}#{rel}@{}:{WATCH_MARKER} ({:?}); the relation must accept {} directly",
+                p.resource_type, p.subject_type, e.code(), p.subject_type
+            )
+        })?
+        .ok_or_else(|| anyhow::anyhow!("SpiceDB wrote the Watch marker at no token"))
+}
+
 /// One Watch message as `rebac.apply_watch`'s arrays. A TOUCH carrying a caveat or an expiry is applied as a removal
 /// (fail closed, then refreshed): the closure refuses both, so only a schema the daemon has not re-checked yet can
 /// produce one.
@@ -340,6 +382,9 @@ fn watch_rows(
             continue;
         };
         let Some(sobj) = &sub.object else { continue };
+        if res.object_id == WATCH_MARKER {
+            continue;
+        }
         let mut subject = format!("{}:{}", sobj.object_type, sobj.object_id);
         if !sub.optional_relation.is_empty() {
             subject = format!("{subject}#{}", sub.optional_relation);
@@ -371,14 +416,30 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
         Err(e) => return Err(e.into()),
     };
     let mut first = true;
+    // CAUGHT UP. A resumed stream first replays what happened while it was down, and nothing in a Watch message says
+    // where that replay ends (SpiceDB sends a checkpoint after every revision it delivers, replayed or not). So, once
+    // the stream is open, the daemon TOUCHES a marker relationship and keeps the stream "not current" until Watch
+    // delivers the marker's own revision: Watch delivers in revision order, so by then every change committed before
+    // the stream opened has been delivered and (in order) applied. Until then the heartbeat stays off and reads stay
+    // closed through the whole replay, not just its first message.
+    let mut caught_up = false;
+    let marker = if apply {
+        Some(write_marker(ctx).await?)
+    } else {
+        None
+    };
+    let catch_up_by = tokio::time::Instant::now() + 6 * ctx.config.deadline();
     let mut alive = tokio::time::interval(Duration::from_millis(ctx.config.heartbeat_ms.max(100)));
     loop {
         let msg = tokio::select! {
             m = stream.message() => m,
-            _ = alive.tick(), if !first && apply => {
+            _ = alive.tick(), if caught_up && apply => {
                 // Connected, and everything delivered is applied: the position is current as of now.
                 ctx.pool.get().await?.execute("select rebac.watch_alive()", &[]).await?;
                 continue;
+            }
+            _ = tokio::time::sleep_until(catch_up_by), if apply && !caught_up => {
+                anyhow::bail!("Watch did not deliver its marker within {:?}; reopening (reads stay closed)", 6 * ctx.config.deadline());
             }
             _ = stop.changed() => return Ok(Resume::Same),
         };
@@ -414,9 +475,16 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
             .await?;
         tx.commit().await?;
         let (external, narrowed): (i32, i32) = (row.get(0), row.get(1));
-        if first {
-            first = false;
+        first = false;
+        if !caught_up && marker.is_some() && token.as_deref() == marker.as_deref() {
+            caught_up = true;
             ctx.watch_current.store(true, Ordering::SeqCst);
+            ctx.pool
+                .get()
+                .await?
+                .execute("select rebac.watch_alive()", &[])
+                .await?;
+            tracing::debug!("Watch caught up: its marker was delivered");
         }
         if external > 0 {
             tracing::info!(
@@ -551,6 +619,22 @@ mod tests {
         assert_eq!(res[0], "container:acme/a");
         assert_eq!(rels[0], "member");
         assert_eq!(subs[0], "group:acme/eng#member");
+    }
+
+    #[test]
+    fn the_watch_marker_never_reaches_apply_watch() {
+        use pb::relationship_update::Operation;
+        let mut marker = update(Operation::Touch, false);
+        if let Some(r) = marker.relationship.as_mut() {
+            r.resource.as_mut().unwrap().object_id = WATCH_MARKER.into();
+        }
+        let msg = pb::WatchResponse {
+            updates: vec![marker, update(Operation::Delete, false)],
+            ..Default::default()
+        };
+        let (ops, res, _, _) = watch_rows(&msg);
+        assert_eq!(ops, ["delete"]);
+        assert_eq!(res, ["container:acme/a"]);
     }
 
     #[test]

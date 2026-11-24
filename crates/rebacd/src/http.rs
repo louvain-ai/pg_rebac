@@ -4,8 +4,10 @@
 
 use crate::{project, Ctx};
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{header::AUTHORIZATION, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -24,12 +26,51 @@ pub struct LookupReply {
     pub error: Option<&'static str>,
 }
 
-pub fn router(ctx: Arc<Ctx>) -> Router {
-    Router::new()
+/// `/lookup` and `/status` behind the bearer token when one is configured; `/healthz` always open (it says nothing).
+pub fn router(ctx: Arc<Ctx>, token: Option<String>) -> Router {
+    let guarded = Router::new()
         .route("/lookup", post(lookup))
-        .route("/healthz", get(|| async { "ok" }))
         .route("/status", get(status))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::new(token),
+            require_token,
+        ));
+    Router::new()
+        .merge(guarded)
+        .route("/healthz", get(|| async { "ok" }))
         .with_state(ctx)
+}
+
+async fn require_token(
+    State(token): State<Arc<Option<String>>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(want) = token.as_deref() {
+        let got = req
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !constant_time_eq(got.as_bytes(), want.as_bytes()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "rebac_unauthorized" })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// Equal, in time that depends only on the lengths: a token is never compared byte by byte with an early exit.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8 | u8::from(a.len() != b.len());
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
 }
 
 async fn lookup(
@@ -124,5 +165,19 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json::Va
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": "database_unavailable" })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn tokens_compare_whole() {
+        assert!(constant_time_eq(b"s3cret", b"s3cret"));
+        assert!(!constant_time_eq(b"s3cret", b"s3creT"));
+        assert!(!constant_time_eq(b"s3cret", b"s3cret!"));
+        assert!(!constant_time_eq(b"", b"s3cret"));
+        assert!(!constant_time_eq(&[0u8; 256], &[0u8; 0]));
     }
 }

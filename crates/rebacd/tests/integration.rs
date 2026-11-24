@@ -624,40 +624,61 @@ async fn the_daemon_end_to_end() {
     stop_tx.send(true).unwrap();
     w.await.unwrap();
     assert!(!wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst));
-    s.write(
-        &[op(true, "container:acme/ext-2", "member", "user:acme/ext")],
-        Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
+    // Several revocations, each its own revision, so the resumed stream replays them as several messages.
+    let backlog: Vec<String> = (2..8).map(|i| format!("ext-{i}")).collect();
+    for d in &backlog {
+        s.write(
+            &[op(
+                true,
+                &format!("container:acme/{d}"),
+                "member",
+                "user:acme/ext",
+            )],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    }
     project::refresh_one(&ctx, "acme", "ext", None, ctx.config.deadline())
         .await
         .unwrap();
     assert!(set_of(&ctx, "acme", "ext")
         .await
         .contains(&"ext-2".to_string()));
-    s.write(
-        &[op(false, "container:acme/ext-2", "member", "user:acme/ext")],
-        Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
+    for d in &backlog {
+        s.write(
+            &[op(
+                false,
+                &format!("container:acme/{d}"),
+                "member",
+                "user:acme/ext",
+            )],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    }
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
-    let mut resumed = false;
-    for _ in 0..100 {
-        if !set_of(&ctx, "acme", "ext")
-            .await
-            .contains(&"ext-2".to_string())
-        {
-            resumed = true;
+    // THE REPLAY IS NOT CURRENT: the stream is current (and the heartbeat may beat) only once SpiceDB's checkpoint says
+    // every change through it was delivered, so at the first instant it is current, the whole backlog is narrowed.
+    let mut current = false;
+    for _ in 0..400 {
+        if wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
+            current = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    assert!(current, "the resumed stream catches up");
+    let left: Vec<String> = set_of(&ctx, "acme", "ext")
+        .await
+        .into_iter()
+        .filter(|c| backlog.contains(c))
+        .collect();
     assert!(
-        resumed,
-        "a revocation made while Watch was down is applied on resume"
+        left.is_empty(),
+        "every revocation made while Watch was down is applied before the stream counts as current: {left:?}"
     );
 
     // A POSITION SPICEDB REFUSES restarts from head with a gap: sets looked up before fail closed, the sweep is forced.
@@ -968,4 +989,55 @@ async fn the_daemon_end_to_end() {
         closure::recheck(&ctx).await.unwrap(),
         closure::Recheck::Rebuilt
     );
+
+    // THE LOOKUP ENDPOINT behind a bearer token: no token or a wrong one is 401 and asks SpiceDB nothing; the right one
+    // projects. /healthz stays open.
+    {
+        use tower::ServiceExt;
+        let ctx = std::sync::Arc::new(ctx);
+        let app = rebacd::http::router(ctx.clone(), Some("lookup-secret".into()));
+        let req = |auth: Option<&str>, path: &str| {
+            let mut b = axum::http::Request::builder()
+                .method(if path == "/lookup" { "POST" } else { "GET" })
+                .uri(path)
+                .header("content-type", "application/json");
+            if let Some(a) = auth {
+                b = b.header("authorization", a);
+            }
+            b.body(axum::body::Body::from(
+                r#"{"tenant":"acme","principal":"tok-probe"}"#,
+            ))
+            .unwrap()
+        };
+        for (auth, path) in [
+            (None, "/lookup"),
+            (Some("Bearer wrong"), "/lookup"),
+            (Some("lookup-secret"), "/lookup"),
+            (None, "/status"),
+        ] {
+            let r = app.clone().oneshot(req(auth, path)).await.unwrap();
+            assert_eq!(r.status(), 401, "{path} with {auth:?} is refused");
+        }
+        let n: i64 = ctx
+            .pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "select count(*) from rebac.principal_state where principal = 'tok-probe'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 0, "a refused lookup projects nothing");
+        let r = app
+            .clone()
+            .oneshot(req(Some("Bearer lookup-secret"), "/lookup"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "the right token is served");
+        let r = app.clone().oneshot(req(None, "/healthz")).await.unwrap();
+        assert_eq!(r.status(), 200, "/healthz needs no token");
+    }
 }
