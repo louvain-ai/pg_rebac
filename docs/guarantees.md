@@ -7,10 +7,21 @@
    `fence.checked` has passed for that query. (A query that is empty for another reason may return empty without
    evaluating it.)
 2. **G2, a revocation is in force at commit.** A view revocation written through `fence.write` is absent from
-   `fence.readable` for every affected principal when the writing transaction commits, whether or not SpiceDB or the
-   daemon is up. That covers direct relations, arrows, the relations reached through an arrow, and memberships of
-   subject sets. If a principal's lock cannot be taken within `narrow_lock_timeout_ms`, the COMMIT fails; it never
-   commits an unnarrowed revocation.
+   the projection for every affected principal when the writing transaction commits, whether or not SpiceDB or the
+   daemon is up. That holds exactly for:
+   - direct relations;
+   - the relations reached through an arrow (`workspace->admin`);
+   - memberships of subject sets.
+   If a principal's lock cannot be taken within `narrow_lock_timeout_ms`, the COMMIT fails; it never commits an
+   unnarrowed revocation.
+
+   Two kinds of removal narrow EVERYONE who holds a container: an arrow tuple (a file leaving its space) and a grant to
+   a subject set. For those, the holders are read before their locks are taken. A refresh that wrote its row before
+   the revoking commit, and committed after that read, keeps the container until the relay claims the row and narrows
+   again. So for these two the promise is "at commit, or at the relay's next pass".
+
+   G2 for arrows, via relations and sets also needs `edge` and `set_grant` to be complete. Every such write must go
+   through `write`, or the tenant must have been backfilled.
 3. **G3, no regrowth.** No refresh can restore a container whose revocation is pending in the outbox. No refresh can
    restore anything for a retired principal.
 4. **G4, at least as fresh.** A refresh queued by a delivery is looked up at `at_least_as_fresh` the token SpiceDB

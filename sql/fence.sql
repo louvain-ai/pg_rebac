@@ -804,8 +804,9 @@ $$;
 -- and never a row whose relationship has an earlier row still undelivered, so no two relays reorder one
 -- relationship. The tenant walk is a loose index scan (one probe per tenant with pending work), and each tenant
 -- offers only its oldest `win` rows, so a flood in one tenant costs the others nothing.
+drop function if exists fence.claim_relay(integer, integer, integer);
 create or replace function fence.claim_relay(lim integer, per_tenant integer, win integer)
-returns table (seq bigint, tenant text, op text, resource text, relation text, subject text)
+returns table (seq bigint, tenant text, op text, resource text, relation text, subject text, age_ms bigint)
 language plpgsql volatile as $$
 begin
   return query
@@ -836,7 +837,7 @@ begin
     limit lim
   ), locked as (
     -- Locked here and re-checked under the lock: another relay may have claimed or delivered a candidate since.
-    select o.seq, o.tenant, o.op, o.resource, o.relation, o.subject
+    select o.seq, o.tenant, o.op, o.resource, o.relation, o.subject, o.created_at
     from fence.outbox o
     where o.seq in (select candidates.seq from candidates) and o.synced_at is null
       and not exists (select 1 from fence.outbox p
@@ -844,7 +845,8 @@ begin
                         and p.seq < o.seq and p.synced_at is null)
     for update of o skip locked
   )
-  select l.seq, l.tenant, l.op, l.resource, l.relation, l.subject
+  select l.seq, l.tenant, l.op, l.resource, l.relation, l.subject,
+         (extract(epoch from (now() - l.created_at)) * 1000)::bigint
   from locked l join candidates c on c.seq = l.seq
   order by c.revoke_last, c.rank, c.seq;
 end $$;

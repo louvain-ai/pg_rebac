@@ -66,12 +66,35 @@ fn subject(r: &str) -> Result<pb::SubjectReference, Status> {
     })
 }
 
-/// SpiceDB refuses this request, and will refuse it however often it is sent. FAILED_PRECONDITION counts: the daemon
-/// sends no preconditions, so on a write it means the tuple names a relation or type the schema does not define
-/// (SpiceDB 1.56 answers an unknown relation that way, not with INVALID_ARGUMENT), and resending it would stall every
-/// later permission change behind it.
+/// What a refused write means for its row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// SpiceDB refuses THIS tuple and always will (INVALID_ARGUMENT): quarantine it, deliver the rest.
+    Quarantine,
+    /// The schema SpiceDB holds lacks the relation ("relation/permission `x` not found under definition `y`",
+    /// FAILED_PRECONDITION). Possibly permanent, possibly a schema that lags a deploy: the row is left undelivered and
+    /// tried again, never holding the rest, and quarantined only once it has failed for longer than the settle window.
+    Defer,
+    /// Anything else, including "object definition `x` not found" (a store with no schema yet): an outage.
+    Outage,
+}
+
+pub fn refusal(s: &Status) -> Refusal {
+    match s.code() {
+        Code::InvalidArgument => Refusal::Quarantine,
+        Code::FailedPrecondition
+            if s.message().contains("relation/permission")
+                && s.message().contains("not found under definition") =>
+        {
+            Refusal::Defer
+        }
+        _ => Refusal::Outage,
+    }
+}
+
+/// The whole request may contain a tuple SpiceDB refuses on its own: re-send it one row at a time.
 pub fn is_invalid(s: &Status) -> bool {
-    matches!(s.code(), Code::InvalidArgument | Code::FailedPrecondition)
+    refusal(s) != Refusal::Outage
 }
 
 /// A subject SpiceDB will not even parse: it contributes nothing to a lookup (fail closed for that identity, never

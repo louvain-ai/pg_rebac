@@ -358,14 +358,36 @@ async fn the_daemon_end_to_end() {
                select fence.write('touch', 'container:acme/bad', 'nosuchrelation', 'user:acme/cy')",
     )
     .await;
-    relay::relay_once(&ctx).await.unwrap();
-    let (quarantined, unsynced): (i64, i64) = {
-        let r = ctx.pool.get().await.unwrap()
+    // An unknown relation is SpiceDB's FAILED_PRECONDITION: possibly a schema that lags a deploy, so while young the
+    // row is DEFERRED (undelivered, no error, the rest delivered, the pass not counting it), and quarantined once settled.
+    let counts = |c: deadpool_postgres::Object| async move {
+        let r = c
             .query_one("select count(*) filter (where error is not null), count(*) filter (where synced_at is null) from fence.outbox", &[])
             .await.unwrap();
-        (r.get(0), r.get(1))
+        (r.get::<_, i64>(0), r.get::<_, i64>(1))
     };
-    assert_eq!((quarantined, unsynced), (1, 0));
+    assert_eq!(
+        relay::relay_once(&ctx).await.unwrap(),
+        1,
+        "only the delivered row counts"
+    );
+    assert_eq!(
+        counts(ctx.pool.get().await.unwrap()).await,
+        (0, 1),
+        "deferred: undelivered, not quarantined"
+    );
+    assert_eq!(
+        relay::relay_once(&ctx).await.unwrap(),
+        0,
+        "a pass holding only a deferred row idles"
+    );
+    sql(&ctx, "update fence.outbox set created_at = now() - interval '11 minutes' where synced_at is null").await;
+    relay::relay_once(&ctx).await.unwrap();
+    assert_eq!(
+        counts(ctx.pool.get().await.unwrap()).await,
+        (1, 0),
+        "quarantined once past the settle window"
+    );
 
     // SHADOW: a shadow daemon writes only readable_shadow, and the compare is clean.
     let shadow = Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Shadow))

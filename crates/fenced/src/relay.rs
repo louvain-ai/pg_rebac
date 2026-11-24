@@ -1,7 +1,7 @@
 //! The relay: Postgres outbox -> SpiceDB, in order, revocations first, no tenant waiting behind another.
 
 use crate::{
-    spicedb::{is_invalid, TupleOp},
+    spicedb::{is_invalid, refusal, Refusal, TupleOp},
     Ctx,
 };
 use std::collections::HashSet;
@@ -11,26 +11,33 @@ use tonic::Status;
 pub struct Row {
     pub seq: i64,
     pub op: TupleOp,
+    /// How long the row has been in the outbox.
+    pub age_ms: i64,
 }
+
+/// How long a row naming a relation SpiceDB's schema lacks is retried (`Refusal::Defer`) before it is quarantined: no
+/// deploy takes this long to write its schema, and a row still refused after it would cost every pass for ever.
+pub const DEFER_SETTLE_MS: i64 = 10 * 60_000;
+
+/// What became of a delivery: SpiceDB's token, the rows quarantined (with reasons), the rows deferred.
+pub type Delivered = (Option<String>, Vec<(i64, String)>, Vec<i64>);
 
 /// Deliver rows; when SpiceDB refuses the batch as invalid, re-send ONE ROW AT A TIME and quarantine only the rows it
 /// refuses on their own, so one poison tuple never holds every later permission change. Any other failure is an
 /// outage: nothing is marked, and the next pass sends everything again (touch and delete are idempotent).
-pub async fn deliver_isolating(
-    ctx: &Ctx,
-    rows: &[Row],
-) -> Result<(Option<String>, Vec<(i64, String)>), Status> {
+pub async fn deliver_isolating(ctx: &Ctx, rows: &[Row]) -> Result<Delivered, Status> {
     if rows.is_empty() {
-        return Ok((None, vec![]));
+        return Ok((None, vec![], vec![]));
     }
     let ops: Vec<TupleOp> = rows.iter().map(|r| r.op.clone()).collect();
     match ctx.spicedb.write(&ops, ctx.config.deadline()).await {
-        Ok(token) => return Ok((token, vec![])),
+        Ok(token) => return Ok((token, vec![], vec![])),
         Err(e) if is_invalid(&e) => {}
         Err(e) => return Err(e),
     }
     let mut token = None;
     let mut refused = vec![];
+    let mut deferred = vec![];
     for r in rows {
         match ctx
             .spicedb
@@ -38,17 +45,20 @@ pub async fn deliver_isolating(
             .await
         {
             Ok(t) => token = t.or(token),
-            Err(e) if is_invalid(&e) => refused.push((
-                r.seq,
-                format!("{:?}: {}", e.code(), e.message())
-                    .chars()
-                    .take(500)
-                    .collect(),
-            )),
-            Err(e) => return Err(e),
+            Err(e) => match refusal(&e) {
+                Refusal::Outage => return Err(e),
+                Refusal::Defer if r.age_ms <= DEFER_SETTLE_MS => deferred.push(r.seq),
+                Refusal::Defer | Refusal::Quarantine => refused.push((
+                    r.seq,
+                    format!("{:?}: {}", e.code(), e.message())
+                        .chars()
+                        .take(500)
+                        .collect(),
+                )),
+            },
         }
     }
-    Ok((token, refused))
+    Ok((token, refused, deferred))
 }
 
 /// One pass. Returns how many rows it claimed; an outage is returned AFTER the transaction commits, so the narrowing
@@ -64,7 +74,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     .await?;
     let claimed = tx
         .query(
-            "select seq, op, resource, relation, subject from fence.claim_relay($1, $2, $3)",
+            "select seq, op, resource, relation, subject, age_ms from fence.claim_relay($1, $2, $3)",
             &[&c.relay_batch, &c.relay_per_tenant, &c.relay_window],
         )
         .await?;
@@ -82,6 +92,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
                 relation: r.get(3),
                 subject: r.get(4),
             },
+            age_ms: r.get(5),
         })
         .collect();
     // Revocations narrow again at claim: a no-op when their transaction narrowed, the safety net when it did not.
@@ -94,6 +105,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     // One WriteRelationships rejects duplicate relationships; the claim never holds two, but split if it ever did.
     let mut token = None;
     let mut refused = vec![];
+    let mut deferred: Vec<i64> = vec![];
     let mut chunk: Vec<&Row> = vec![];
     let mut seen = HashSet::new();
     let mut failure = None;
@@ -114,12 +126,14 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
             .map(|r| Row {
                 seq: r.seq,
                 op: r.op.clone(),
+                age_ms: r.age_ms,
             })
             .collect();
         match deliver_isolating(ctx, &owned).await {
-            Ok((t, q)) => {
+            Ok((t, q, d)) => {
                 token = t.or(token);
                 refused.extend(q);
+                deferred.extend(d);
             }
             Err(e) => {
                 failure = Some(e);
@@ -139,7 +153,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     let delivered: Vec<i64> = rows
         .iter()
         .map(|r| r.seq)
-        .filter(|s| !refused_seqs.contains(s))
+        .filter(|s| !refused_seqs.contains(s) && !deferred.contains(s))
         .collect();
     let (rs, reasons): (Vec<i64>, Vec<String>) = refused.into_iter().unzip();
     tx.query_one(
@@ -154,6 +168,13 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
             "quarantined tuples SpiceDB refuses as invalid, so delivery can continue"
         );
     }
+    if !deferred.is_empty() {
+        tracing::warn!(
+            deferred = deferred.len(),
+            "rows naming a relation SpiceDB does not define yet, left undelivered and retried"
+        );
+    }
     tracing::debug!(claimed = rows.len(), narrowed, "relay pass");
-    Ok(rows.len())
+    // A deferred row is not counted: a pass that settled nothing idles rather than spinning on it.
+    Ok(rows.len() - deferred.len())
 }
