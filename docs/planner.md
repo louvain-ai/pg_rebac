@@ -289,7 +289,7 @@ What it shows:
 3. **Narrow readers have no N that works.** At 0.1% breadth, N = 4,000 kept 13% of k (73.7 ms). Filling k would take
    N of about 20,000, beyond `ef_search`'s maximum of 1,000, so it rests on iterative scanning anyway. The fenced
    ANN leg is no answer there either (114 ms, 0.74 of k); the exact path is (6.7 ms with full recall in the second
-   run), which `rebac.fenced_ids` (0.2.0, unreleased) chooses by itself.
+   run), which `rebac.fenced_ids` chooses by itself.
 
 Limits: the same as the second run (synthetic embeddings, a warm cache, one node and tenant, `fsync = off`, one
 client), plus: the over-fetch rows were filtered inside Postgres, so no network transfer of N rows to an application
@@ -302,7 +302,7 @@ measured here.
   relaxed_order`.
 - Route readers below a few thousand candidate rows to the exact path, as
   `container = any(array(select * from rebac.readable_set(p)))`, using `rebac.breadth(p)`.
-- From 0.2.0 (unreleased), `rebac.fenced_ids(p, tbl, q, k)` routes by itself: it counts the reader's candidate rows
+- `rebac.fenced_ids(p, tbl, q, k)` routes by itself: it counts the reader's candidate rows
   up to `exact_below_rows` (default 5,000) and sorts them exactly below it, or runs the fenced HNSW scan with
   `relaxed_order` above it. Measured on the 128-dimension data (k = 20, p50):
 
