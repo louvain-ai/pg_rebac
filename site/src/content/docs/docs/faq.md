@@ -57,7 +57,8 @@ Both are AuthZed's. As their docs describe them on 2026-11-24:
     paths for pgvector's HNSW scans (relaxed iterative scans, and an exact path for narrow readers);
   - a warm read makes no call to SpiceDB;
   - a revocation written through `rebac.write` is removed in the same transaction that writes it, for the
-    [schema shapes it supports](/docs/schema-support/): direct relations, arrows and one level of subject sets.
+    [schema shapes it supports](/docs/schema-support/): unions and intersections of direct relations, arrows and one
+    level of subject sets.
     Schemas outside those are refused.
 
 Choose Materialize for a schema shape pg_rebac refuses and Materialize supports, or to feed permissions to more than one
@@ -75,6 +76,59 @@ pg_rebac mirrors the permission into Postgres, so the fence applies before the `
 same plan as pgvector or full-text search. A SpiceDB outage costs at most the liveness bound (5 s), then reads
 fail closed. It does not replace SpiceDB's check API for writes, and it does not evaluate caveats.
 
+## What happens when SpiceDB or rebacd is down?
+
+Reads fail closed, with bounds you set:
+
+- a revocation through `rebac.write` is in force at commit whether SpiceDB and the daemon are up or not;
+- the daemon heartbeats while it reaches SpiceDB and Postgres; with no beat for `max_staleness_ms` (5 s), every read
+  is `RB503`;
+- if only the Watch stream drops, a principal still reads while Watch was current, or its own lookup began, within
+  `watch_grace_ms` (5 s); the rest are `RB503` until Watch is back or `POST /lookup` re-projects them;
+- a set whose lookup is older than `max_projection_age_ms` (one hour) is `RB503`.
+
+Run two or more daemons for availability: one leads (Watch, the closure check, the sweep) and another takes over
+within seconds ([rebacd](/docs/rebacd/#several-daemons)).
+
+## How fresh is it, and what about zedtokens?
+
+A revocation through `rebac.write` is in force when its transaction commits. A revocation written straight to SpiceDB
+leaves the projection as Watch delivers it, or reads fail closed. A grant shows up after the relay delivers it and a
+refresh runs, which looks up `at_least_as_fresh` the zedtoken SpiceDB wrote it at. That default can be served up to
+SpiceDB's revision quantization (5 s) before a later delete, so a relayed arrow or group revocation may briefly regrow
+until the sweep re-sends it; `consistency = "fully_consistent"` closes that window
+([consistency](/docs/concepts/consistency/)).
+
+## Can a role read a fenced table without the fence?
+
+Yes, as with any row-level security: a superuser, a role with `BYPASSRLS`, the table's owner (unless the table is
+`FORCE ROW LEVEL SECURITY`; `rebac.enable_rls(..., force => true)` sets it), a view planned with its owner's rights
+(give it `security_invoker`, Postgres 15+), a materialized view, and a `SECURITY DEFINER` function owned by such a
+role. `rebac.enable_rls` warns about each role and view it finds, and `select * from rebac.rls_bypasses('doc')` lists
+them at any time. Fencing in the query (`container in (select * from rebac.readable_set(p))`) does not depend on any
+of this.
+
+## What does a transaction that is already open see after a revocation?
+
+What its snapshot saw. Postgres reads are snapshot reads: a READ COMMITTED query started after the revoking commit
+sees the narrowed projection, but a REPEATABLE READ or SERIALIZABLE transaction that took its snapshot before keeps
+reading the old rows until it ends. Keep fenced reads in short transactions. A revocation itself must commit under
+READ COMMITTED, the Postgres default; `rebac.write` refuses one under REPEATABLE READ or SERIALIZABLE with `RB422`.
+
+## How do I upgrade?
+
+Run the new release's `rebac.sql` over the old one (`psql -v ON_ERROR_STOP=1 -f pg_rebac--<version>.sql`): every
+statement is `create … if not exists`, `create or replace` or an `alter … if not exists`, so it applies in place and
+keeps the projection. Then restart `rebacd` on the same release. The CHANGELOG names each upgrade that makes reads
+`RB503` until principals are re-projected (0.1 to 0.2 records one Watch gap): run `rebacd backfill --tenant <t>` per
+tenant first, or let the forced sweep do it, and `POST /lookup` re-projects any one principal at once.
+
+## Who maintains it?
+
+Louvain builds and maintains pg_rebac and runs it in its own product. It is Apache-2.0 with no CLA: contributions are
+signed off under the Developer Certificate of Origin (`git commit -s`), so the licence of every line stays Apache-2.0.
+Report a vulnerability privately, as `SECURITY.md` describes.
+
 ## Does it need a C extension?
 
 No. It is plain SQL and PL/pgSQL, installed with `psql -f`, so it runs on hosted Postgres that does not allow
@@ -82,12 +136,13 @@ custom extensions. The `rebacd` daemon needs only an ordinary connection.
 
 ## Which Postgres and pgvector versions?
 
-The schema targets Postgres 14 and later. The test suite and the planner study run on Postgres 17 with pgvector
-0.8. Fenced ANN reads need pgvector 0.8 or later for `hnsw.iterative_scan`.
+Postgres 14 and later. CI runs the whole SQL suite on Postgres 14, 15, 16 and 17 with pgvector, as a superuser and
+again as a database owner that is not one. The planner studies ran on Postgres 17 with pgvector 0.8. Fenced ANN reads
+need pgvector 0.8 or later for `hnsw.iterative_scan`; nothing else needs pgvector.
 
 ## Who runs it in production?
 
-Louvain:
+Louvain mirrors every permission change into pg_rebac and verifies it against SpiceDB daily:
 
 - Louvain's own permission projection is mirrored into pg_rebac's tables, in each writer's transaction;
 - a shadow `rebacd` re-projects every reader from SpiceDB into `rebac.readable_shadow`;

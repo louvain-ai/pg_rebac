@@ -1044,6 +1044,44 @@ begin
 end $$;
 revoke all on function rebac.session_readable_set() from public;
 
+-- WHO READS `tbl` WITHOUT THE FENCE. Row-level security does not apply to: a superuser; a role with BYPASSRLS; the
+-- table's owner, unless FORCE ROW LEVEL SECURITY; and anything that runs with such a role's rights, notably a view
+-- (planned with its OWNER's rights unless it has security_invoker, Postgres 15+) and a materialized view (its rows
+-- were read once, by its owner). rebac.enable_rls warns about each; call this to audit a table at any time.
+-- SECURITY DEFINER functions owned by such a role are not listed (Postgres records no dependency on what a
+-- function's body reads); audit those by hand.
+create or replace function rebac.rls_bypasses(tbl regclass)
+returns table (kind text, name text, why text)
+language sql stable as $$
+  with t as (select c.oid, c.relowner, c.relforcerowsecurity from pg_class c where c.oid = tbl),
+  bypass as (
+    select r.oid, r.rolname,
+           case when r.rolsuper then 'superuser' when r.rolbypassrls then 'BYPASSRLS'
+                else 'owns the table, which is not FORCE ROW LEVEL SECURITY' end as why
+    from pg_roles r, t
+    where r.rolsuper or r.rolbypassrls or (r.oid = t.relowner and not t.relforcerowsecurity)
+  )
+  select 'role', b.rolname::text, b.why from bypass b
+  where has_table_privilege(b.oid, tbl, 'SELECT')
+  union all
+  select case v.relkind when 'm' then 'materialized view' else 'view' end,
+         v.oid::regclass::text,
+         case v.relkind when 'm' then 'holds rows its owner read without the fence'
+              else 'runs with the rights of its owner ' || o.rolname || ' (' || b.why || '); give it security_invoker'
+         end
+  from pg_depend d
+  join pg_rewrite w on w.oid = d.objid and d.classid = 'pg_rewrite'::regclass
+  join pg_class v on v.oid = w.ev_class and v.relkind in ('v', 'm') and v.oid <> tbl
+  join pg_roles o on o.oid = v.relowner
+  left join bypass b on b.oid = v.relowner
+  where d.refobjid = tbl and d.refclassid = 'pg_class'::regclass
+    and (v.relkind = 'm'
+         or (b.oid is not null
+             and not coalesce('security_invoker=true' = any(v.reloptions)
+                              or 'security_invoker=on' = any(v.reloptions), false)))
+  group by v.oid, v.relkind, o.rolname, b.why
+$$;
+
 -- Generate a row-level-security policy that fences reads of `tbl` on `container_column`.
 --   * RESTRICTIVE: it is ANDed with every other policy on the table, so no permissive policy (an application's own,
 --     added before or after) can widen it. Postgres returns nothing through restrictive policies alone, so when the
@@ -1060,7 +1098,7 @@ create or replace function rebac.enable_rls(tbl regclass, container_column text,
                                             principal_source text default 'setting')
 returns void
 language plpgsql volatile as $$
-declare owner_name name;
+declare owner_name name; b record;
 begin
   if principal_source not in ('setting', 'session') then
     raise exception 'rebac.enable_rls: principal_source is setting or session' using errcode = 'RB422';
@@ -1087,6 +1125,9 @@ begin
     execute format('drop policy if exists rebac_base on %s', tbl);
     execute format('create policy rebac_base on %s as permissive for select using (true)', tbl);
   end if;
+  for b in select * from rebac.rls_bypasses(tbl) loop
+    raise warning 'rebac.enable_rls: % % reads % without the fence: %', b.kind, b.name, tbl, b.why;
+  end loop;
 end $$;
 
 -- -------------------------------------------------------------------------------------------------------------------

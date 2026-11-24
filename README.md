@@ -161,8 +161,9 @@ Because a search engine's `limit` runs before your filter, and everything it com
 
 ## In production
 
-Louvain runs pg_rebac in production: its permission projection is mirrored into pg_rebac, `rebacd` re-projects
-every reader from SpiceDB, and `rebacd verify --all-tenants --shadow` compares the two once a day.
+Louvain mirrors every permission change into pg_rebac and verifies it against SpiceDB daily: its permission
+projection is written into pg_rebac's tables in each writer's transaction, `rebacd` re-projects every reader from
+SpiceDB, and `rebacd verify --all-tenants --shadow` compares the two and fails on any extra row.
 
 ## What you get
 

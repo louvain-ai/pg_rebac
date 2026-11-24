@@ -176,7 +176,7 @@
 - **Projection rows written by anything but `rebac.project`** (an application's own mirror into `rebac.readable`) do
   not take the lock order, so G2's race argument does not cover them.
 
-## Where slice 1 differs from the design document
+## Design decisions
 
 - **The planner-shaped primitive is the set, not the boolean.** Postgres never inlines a scalar SQL function whose
   body has a sub-select, so `readable_by(p, c)` written as `exists (...)` is a per-row function call. Measured with
@@ -184,7 +184,8 @@
   `readable_by` remains, as a per-row check.
 - **The principal's check is a pseudo-constant qual.** It is evaluated once, in a gating filter. The principal is
   compared as the caller's own value, so the planner sees its statistics.
-- **Liveness fails closed by default** (5 s), as the owner decided, and so does freshness (one hour). Revocations
-  through the outbox never wait on either.
-- **Consistency is `at_least_as_fresh`** by default, as the owner decided. `fully_consistent` is a setting.
-- **Subject sets, one level, are supported in slice 1.** Louvain's schema, the first pg_rebac runs against (in shadow), uses them.
+- **Liveness fails closed by default** (5 s), and so does freshness (one hour): an answer the daemon cannot vouch for
+  is an error, never a quietly older set. Revocations through the outbox never wait on either.
+- **Consistency is `at_least_as_fresh`** by default, so a refresh costs SpiceDB a cached read where it can;
+  `fully_consistent` is a setting, and closes G3's window.
+- **Subject sets one level deep are supported**, because group grants are the common shape of company permissions.

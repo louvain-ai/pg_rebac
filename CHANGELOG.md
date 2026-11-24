@@ -24,6 +24,11 @@
   restarts from the head revision read directly, and a resumed stream that delivers nothing for `watch_quiet_ms`
   (new, 3 s) counts as current.
 
+- **`rebac.rls_bypasses(tbl)`: who reads a fenced table without the fence** (superusers, `BYPASSRLS` roles, an owner
+  without FORCE, views without `security_invoker`, materialized views). `rebac.enable_rls` warns about each.
+- **Docs.** The FAQ answers outages, freshness and zedtokens, RLS bypasses, open transactions after a revocation,
+  upgrades and maintenance; NOTICE names the vendored protos' copyright holders.
+
 ## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security

@@ -83,3 +83,28 @@ select t.raises($$ select rebac.set_principal('acme', 'lk') $$, '25006', 'bindin
 rollback;
 reset role;
 reset rebac.principal;
+
+-- WHO BYPASSES THE FENCE: rebac.rls_bypasses names every role and view that reads a fenced table without it.
+create table audit_doc (id int primary key, container text);
+select rebac.enable_rls('audit_doc', 'container', force => true);
+select t.ok(not exists (select 1 from rebac.rls_bypasses('audit_doc') where kind = 'role' and name = current_user
+                          and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)),
+            'a FORCEd table: its owner is not listed (unless it is a superuser or BYPASSRLS anyway)');
+create view audit_v as select * from audit_doc;
+select t.ok(exists (select 1 from rebac.rls_bypasses('audit_doc') where kind = 'view' and name = 'audit_v')
+            = (select rolsuper or rolbypassrls from pg_roles where rolname = current_user),
+            'a view owned by a role that bypasses RLS is listed');
+do $$ begin
+  if current_setting('server_version_num')::int >= 150000 then
+    execute 'alter view audit_v set (security_invoker = true)';
+    perform t.ok(not exists (select 1 from rebac.rls_bypasses('audit_doc') where name = 'audit_v'),
+                 'with security_invoker it is not');
+  end if;
+end $$;
+create materialized view audit_m as select * from audit_doc;
+select t.ok(exists (select 1 from rebac.rls_bypasses('audit_doc') where kind = 'materialized view' and name = 'audit_m'),
+            'a materialized view always is: it holds rows read once, by its owner');
+-- An unforced table's owner is listed.
+create table audit_open (id int primary key, container text);
+select t.ok(exists (select 1 from rebac.rls_bypasses('audit_open') where kind = 'role' and name = current_user),
+            'the owner of a table without FORCE ROW LEVEL SECURITY is listed');
