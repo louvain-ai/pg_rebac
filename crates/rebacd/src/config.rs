@@ -32,7 +32,7 @@ pub struct Config {
     pub consistency: Consistency,
     pub mode: Mode,
     pub listen: String,
-    /// The NAME of the environment variable holding a bearer token for `POST /lookup` and `GET /status`, never the
+    /// The NAME of the environment variable holding a bearer token for `POST /lookup`, `GET /status` and `GET /metrics`, never the
     /// token. Set, each such request must carry `Authorization: Bearer <token>` (compared in constant time) or gets 401.
     /// Unset, they are open to whoever can reach `listen`, which is why `listen` defaults to loopback.
     pub lookup_token_env: Option<String>,

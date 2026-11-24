@@ -46,7 +46,7 @@ The SQL is installed separately, with `psql` or your migrations. No published im
   relationship it touches instead, for a datastore whose revisions it cannot compare.
 - **Closure.** Re-reads the live schema every `closure_check_ms` (10 seconds), and at once on Watch's notice, so a
   schema change is caught with `watch = false` too. See [schema changes while running](#schema-changes-while-running).
-- **HTTP.** `POST /lookup`, `GET /healthz` and `GET /status` on `listen`.
+- **HTTP.** `POST /lookup`, `GET /healthz`, `GET /status` and `GET /metrics` (Prometheus) on `listen`.
 
 ## Configuration
 
@@ -183,10 +183,10 @@ The answer is written down, an empty one included. If SpiceDB cannot answer, the
 marked unavailable (`RB503` on the next read, never an empty set) and queued for retry.
 
 The reply names how many containers the principal reads, and any caller can make the daemon ask SpiceDB. So
-`POST /lookup` and `GET /status` are for your application only:
+`POST /lookup`, `GET /status` and `GET /metrics` are for your application only:
 
 - `listen` defaults to loopback (`127.0.0.1:7341`).
-- With `lookup_token_env` set, both require `Authorization: Bearer <token>`, compared in constant time; anything else
+- With `lookup_token_env` set, all three require `Authorization: Bearer <token>`, compared in constant time; anything else
   is a 401 that asks SpiceDB nothing. `GET /healthz` needs no token.
 - On any other address without a token, the daemon logs a warning at start.
 

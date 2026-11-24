@@ -1251,5 +1251,18 @@ async fn the_daemon_end_to_end() {
         assert_eq!(r.status(), 200, "the right token is served");
         let r = app.clone().oneshot(req(None, "/healthz")).await.unwrap();
         assert_eq!(r.status(), 200, "/healthz needs no token");
+        let r = app.clone().oneshot(req(None, "/metrics")).await.unwrap();
+        assert_eq!(r.status(), 401, "/metrics is behind the token");
+        let r = app
+            .clone()
+            .oneshot(req(Some("Bearer lookup-secret"), "/metrics"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("\nrebac_up 1\n"), "metrics: {text}");
+        assert!(text.contains("rebac_pending_outbox "), "metrics: {text}");
+        assert!(!text.contains("acme"), "no tenant id is ever a label");
     }
 }

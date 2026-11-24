@@ -35,6 +35,9 @@
   Postgres**: the install beside the usual extensions, re-run over itself, and the daemon's calls as a role with
   privileges on schema `rebac` only. Getting started documents both.
 
+- **`GET /metrics`**: `rebac.status()` as Prometheus gauges, plus `rebacd_leader` and `rebacd_watch_current`. No id is
+  ever a label; behind the lookup token when one is set.
+
 ## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security

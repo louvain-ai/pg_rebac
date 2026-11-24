@@ -42,6 +42,11 @@ What each one usually means:
 - `external_writes` above zero: something writes SpiceDB directly. Those revocations are not in force at commit.
   They are narrowed from Watch as SpiceDB delivers them.
 
+The daemon serves the same numbers as Prometheus gauges at `GET /metrics` (`rebac_pending_outbox`,
+`rebac_relay_lag_ms`, `rebac_watch_age_ms`, `rebac_unfresh_principals` and the rest, named after the columns), plus
+`rebacd_leader` and `rebacd_watch_current` for that daemon. They are counts and ages only: no tenant, principal or
+container is ever a label. With `lookup_token_env` set, scrape it with the bearer token.
+
 ## Logs
 
 `REBACD_LOG_FORMAT=json` writes one JSON object per line. A failure is logged by its kind

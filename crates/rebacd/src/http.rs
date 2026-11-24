@@ -31,6 +31,7 @@ pub fn router(ctx: Arc<Ctx>, token: Option<String>) -> Router {
     let guarded = Router::new()
         .route("/lookup", post(lookup))
         .route("/status", get(status))
+        .route("/metrics", get(metrics))
         .route_layer(middleware::from_fn_with_state(
             Arc::new(token),
             require_token,
@@ -131,6 +132,110 @@ async fn lookup(
             )
         }
     }
+}
+
+/// Prometheus text: rebac.status()'s numbers as gauges, plus this daemon's own leader and Watch state. Counts and ages
+/// only: no tenant, principal or container id is ever a label.
+async fn metrics(State(ctx): State<Arc<Ctx>>) -> Response {
+    let r = async {
+        let c = ctx.pool.get().await?;
+        let row = c
+            .query_one(
+                "select heartbeat_age_ms, pending_outbox, quarantined, refresh_queue, external_writes,
+                        unavailable_principals, relay_lag_ms, watch_age_ms, oldest_lookup_ms, unfresh_principals
+                 from rebac.status()",
+                &[],
+            )
+            .await?;
+        anyhow::Ok(row)
+    }
+    .await;
+    let mut out = String::new();
+    let mut gauge = |name: &str, help: &str, v: Option<f64>| {
+        if let Some(v) = v {
+            out.push_str(&format!(
+                "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}\n"
+            ));
+        }
+    };
+    use std::sync::atomic::Ordering;
+    gauge(
+        "rebacd_leader",
+        "1 while this daemon holds the leader lock (or leader election is off)",
+        Some(f64::from(u8::from(crate::leader::is_leader(&ctx)))),
+    );
+    gauge(
+        "rebacd_watch_current",
+        "1 while this daemon's Watch stream is caught up and applying",
+        Some(f64::from(u8::from(
+            ctx.watch_current.load(Ordering::SeqCst),
+        ))),
+    );
+    match r {
+        Ok(row) => {
+            let i = |n: usize| row.get::<_, Option<i64>>(n).map(|v| v as f64);
+            gauge("rebac_up", "1 when rebac.status() answered", Some(1.0));
+            gauge(
+                "rebac_heartbeat_age_ms",
+                "Age of the newest heartbeat",
+                i(0),
+            );
+            gauge(
+                "rebac_pending_outbox",
+                "Relationship writes not yet delivered to SpiceDB",
+                i(1),
+            );
+            gauge(
+                "rebac_quarantined",
+                "Outbox rows SpiceDB refused on their own",
+                i(2),
+            );
+            gauge(
+                "rebac_refresh_queue",
+                "Principals queued for a refresh",
+                i(3),
+            );
+            gauge(
+                "rebac_external_writes",
+                "Changes seen on Watch that did not come through rebac.write",
+                i(4),
+            );
+            gauge(
+                "rebac_unavailable_principals",
+                "Principals whose last lookup failed (RB503)",
+                i(5),
+            );
+            gauge(
+                "rebac_relay_lag_ms",
+                "Age of the oldest undelivered outbox row",
+                i(6),
+            );
+            gauge(
+                "rebac_watch_age_ms",
+                "Time since Watch was last current",
+                i(7),
+            );
+            gauge(
+                "rebac_oldest_lookup_ms",
+                "Age of the oldest projected lookup",
+                i(8),
+            );
+            gauge(
+                "rebac_unfresh_principals",
+                "Principals past the freshness bound or of unknown age",
+                i(9),
+            );
+        }
+        Err(_) => gauge("rebac_up", "1 when rebac.status() answered", Some(0.0)),
+    }
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        out,
+    )
+        .into_response()
 }
 
 async fn status(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json::Value>) {
