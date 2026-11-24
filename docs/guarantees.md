@@ -137,8 +137,21 @@
       `rebacd backfill` and `rebacd run` store a position before they project anything, so the gap on a first start
       precedes every lookup it makes.
 
-    With several daemons, each applies Watch and each beats only while its own stream is applying; reads stay open
-    while any one of them beats. A store that cannot serve Watch fails every read closed with Watch on: set
+    **With several daemons** on one database, one leads: it holds a session advisory lock (`1919050596, 1`; a shadow
+    daemon's is `1919050596, 2`) on a connection of its own, and only it runs Watch, the closure check and the sweep.
+    Every daemon relays, refreshes and serves `POST /lookup`. Every Watch write runs in a transaction that first calls
+    `rebac.assert_leader` with the lock connection's backend pid: it locks the applied position's row and raises
+    unless that backend still holds the lock, so a daemon whose lock connection died cannot commit another Watch write,
+    even before it notices. Another daemon takes the lock within `leader_retry_ms` (2 s) and resumes Watch from the
+    applied position (`leader_election = false` runs everything in every daemon, for a single daemon).
+    - **A quiet resumed stream.** A store with nothing to replay may send a resumed stream nothing at all (SpiceDB's
+      in-memory datastore sends no idle checkpoint, and its head revision is a clock reading no position reaches until
+      the next change). A resumed stream that delivers nothing for `watch_quiet_ms` (3 s, above SpiceDB's 1 s Watch
+      heartbeat, after which a datastore that heartbeats has already sent a checkpoint at the head) counts as current.
+      This rests on SpiceDB delivering a replay without pausing for that long; `watch_quiet_ms = 0` turns it off,
+      leaving only the head comparison.
+    - **No position at all** (a first start): the daemon reads the head revision, records the gap at it
+      (`rebac.watch_restarted`) and resumes from there. A store that cannot serve Watch fails every read closed with Watch on: set
     `watch = false` there, and G7's sweep bound applies instead. In shadow mode Watch only counts, under its own position
     (`watch_shadow`), so a shadow daemon never moves the live one's.
 

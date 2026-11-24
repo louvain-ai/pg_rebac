@@ -83,6 +83,9 @@ watch             = true
 | `closure_check_ms` | 10000 | How often the live schema is re-read for a closure change |
 | `watch_resume_max_age_ms` | 3600000 | The oldest Watch position resumed from; older restarts from head with a gap |
 | `watch_marker` | false | A reopened stream waits for a marker relationship it touches, not for the head revision |
+| `watch_quiet_ms` | 3000 | A resumed stream that delivers nothing this long has nothing to replay, and counts as current; 0 off |
+| `leader_election` | true | Only the daemon holding the leader lock runs Watch, the closure check and the sweep |
+| `leader_retry_ms` | 2000 | How often a daemon that does not lead tries the lock |
 
 What is projected lives in the `rebac.config` table, which the SQL and the daemon both read, so the two cannot
 disagree:
@@ -99,6 +102,21 @@ disagree:
 | `empty_ttl_ms` | 60000 |
 | `max_containers_per_principal` | 100000 |
 | `narrow_lock_timeout_ms` | 5000 |
+
+## Several daemons
+
+Run two or more `rebacd run` against one database for availability, or through a rolling deploy. One leads: it holds a
+session advisory lock, `pg_try_advisory_lock(1919050596, 1)`, on a connection of its own, and only it runs Watch, the
+closure check and the sweep. Every daemon relays the outbox (rows are claimed with `skip locked`, and one
+relationship's rows are delivered in order), refreshes principals (under leases) and serves `POST /lookup`.
+
+If the leader stops or its lock connection dies, another daemon takes the lock within `leader_retry_ms` and resumes
+Watch from the applied position. A deposed leader cannot commit one more Watch write: each runs in a transaction that
+first calls `rebac.assert_leader` with the lock connection's backend pid, which raises (`RB503`) unless that backend
+still holds the lock. A shadow daemon takes `(1919050596, 2)`, so it never displaces the live leader.
+
+The lock needs a real session. Point `DATABASE_URL` at Postgres itself, or at a pooler in session mode: through a
+pooler in transaction mode, a session-level advisory lock belongs to whichever server connection ran it.
 
 ## Shadow and live
 

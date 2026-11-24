@@ -1446,6 +1446,25 @@ language sql volatile as $$
   where scope = 'watch_applied'
 $$;
 
+-- THE LEADER FENCE. Among several daemons, only the one holding the session advisory lock (1919050596, 1) applies
+-- Watch (a shadow daemon's lock is (1919050596, 2), so a shadow never displaces the live leader); every Watch write runs in a transaction that calls this first with the lock connection's backend pid. It
+-- locks the applied position's row (so two appliers' writes never interleave) and raises unless that backend still
+-- holds the lock, so a daemon whose lock connection died cannot commit one more write. pid 0: leader election is off.
+create or replace function rebac.assert_leader(pid integer, lock_key integer default 1) returns void
+language plpgsql volatile as $$
+declare sc text := case when lock_key = 1 then 'watch_applied' else 'watch_shadow' end;
+begin
+  if pid = 0 then return; end if;
+  insert into rebac.watch_state (scope) values (sc) on conflict (scope) do nothing;
+  perform 1 from rebac.watch_state where scope = sc for update;
+  if not exists (select 1 from pg_locks l
+                 where l.locktype = 'advisory' and l.classid = 1919050596 and l.objid = lock_key and l.objsubid = 2
+                   and l.granted and l.pid = assert_leader.pid) then
+    raise exception 'rebac: this daemon no longer holds the leader lock' using errcode = 'RB503',
+      hint = 'rebac_not_leader: another rebacd took over; this one stops applying Watch';
+  end if;
+end $$;
+
 -- A live daemon says whether reads depend on its Watch stream: true with Watch on, false with `watch = false`.
 create or replace function rebac.watch_required(required boolean) returns void
 language sql volatile as $$

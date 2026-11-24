@@ -15,6 +15,15 @@
   the closure: a delete on any branch narrows at commit, and a grant queues a refresh. `.all()` and exclusion stay
   refused, and every refusal now states why.
 
+- **Several daemons on one database, safely: leader election.** Only the daemon holding a session advisory lock
+  (`1919050596, 1`; shadow `1919050596, 2`) runs Watch, the closure check and the sweep; every daemon relays,
+  refreshes and serves `/lookup`. Every Watch write is fenced by `rebac.assert_leader(pid, lock_key)` (new), so a
+  deposed leader cannot commit another. `leader_election` (on) and `leader_retry_ms` (2 s) are new settings.
+- **A Watch stream on an idle store goes current (fix).** In 0.2.0 a live daemon with Watch on, restarted against an
+  idle in-memory SpiceDB, never heartbeated until the next change, so every read was refused. A first start now
+  restarts from the head revision read directly, and a resumed stream that delivers nothing for `watch_quiet_ms`
+  (new, 3 s) counts as current.
+
 ## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security

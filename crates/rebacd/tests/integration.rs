@@ -78,6 +78,8 @@ fn config(url_env: &str, endpoint: &str, mode: Mode) -> Config {
         mode,
         deadline_ms: 2_000,
         read_deadline_ms: 2_000,
+        // The loops below are driven one by one; the leader test turns it on.
+        leader_election: false,
         ..Config::default()
     }
 }
@@ -102,6 +104,12 @@ async fn set_of(ctx: &Ctx, tenant: &str, p: &str) -> Vec<String> {
     .iter()
     .map(|r| r.get(0))
     .collect()
+}
+
+/// Refused by rebac.assert_leader (its RB503 message), or by a connection that is gone.
+fn fenced(e: &anyhow::Error) -> bool {
+    let m = format!("{e:#}");
+    m.contains("no longer holds the leader lock") || m.contains("closed")
 }
 
 async fn sql(ctx: &Ctx, q: &str) {
@@ -682,6 +690,29 @@ async fn the_daemon_end_to_end() {
         "every revocation made while Watch was down is applied before the stream counts as current: {left:?}"
     );
 
+    // AN IDLE STORE: the stream stops and reopens with nothing changed meanwhile. The stored position is at the head,
+    // so the stream is current at once, with no change to wait for (an idle in-memory store sends nothing at all).
+    stop_tx.send(true).unwrap();
+    w.await.unwrap();
+    assert!(!wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst));
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
+    let reopened = std::time::Instant::now();
+    let mut idle_current = false;
+    // Within watch_quiet_ms (3 s) and a little.
+    for _ in 0..600 {
+        if wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
+            idle_current = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        idle_current,
+        "a stream reopened on an idle store is current without waiting for a change (watch_quiet_ms)"
+    );
+    eprintln!("idle reopen current after {:?}", reopened.elapsed());
+
     // A POSITION SPICEDB REFUSES restarts from head with a gap: sets looked up before fail closed, the sweep is forced.
     stop_tx.send(true).unwrap();
     w.await.unwrap();
@@ -1054,6 +1085,93 @@ async fn the_daemon_end_to_end() {
         closure::recheck(&ctx).await.unwrap(),
         closure::Recheck::Rebuilt
     );
+
+    // ONE LEADER. Two daemons on one database: exactly one holds the lock; the other's Watch writes are refused by the
+    // fence. The leader's lock connection is killed: before it even notices, its own Watch writes are refused (a
+    // deposed leader cannot commit one more), and the other takes over.
+    {
+        let lc = |_: ()| Config {
+            leader_election: true,
+            leader_retry_ms: 100,
+            heartbeat_ms: 100,
+            ..config("REBAC_IT_DB", &endpoint, Mode::Live)
+        };
+        let a = std::sync::Arc::new(Ctx::connect(lc(())).await.unwrap());
+        let b = std::sync::Arc::new(Ctx::connect(lc(())).await.unwrap());
+        let (stop_tx, stop) = tokio::sync::watch::channel(false);
+        let la = tokio::spawn(rebacd::leader::leader_loop(a.clone(), stop.clone()));
+        let lb = tokio::spawn(rebacd::leader::leader_loop(b.clone(), stop.clone()));
+        let leaders = || {
+            [&a, &b]
+                .iter()
+                .filter(|c| rebacd::leader::is_leader(c))
+                .count()
+        };
+        for _ in 0..100 {
+            if leaders() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(leaders(), 1, "exactly one of two daemons leads");
+        let (lead, follow) = if rebacd::leader::is_leader(&a) {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
+        rebacd::leader::fenced_execute(&lead, "select rebac.watch_alive()", &[])
+            .await
+            .expect("the leader's Watch write passes the fence");
+        // The follower, forced to try (as a daemon that wrongly believed it led would): refused.
+        follow.leader_pid.store(
+            lead.leader_pid.load(std::sync::atomic::Ordering::SeqCst) + 100_000,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let e = rebacd::leader::fenced_execute(&follow, "select rebac.watch_alive()", &[])
+            .await
+            .unwrap_err();
+        assert!(fenced(&e), "a pid that holds no lock is fenced off: {e:#}");
+        follow
+            .leader_pid
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        // Kill the leader's lock connection. Its pid is still set (it has not noticed): the fence refuses it anyway.
+        let pid = lead.leader_pid.load(std::sync::atomic::Ordering::SeqCst);
+        sql(&ctx, &format!("select pg_terminate_backend({pid})")).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if lead.leader_pid.load(std::sync::atomic::Ordering::SeqCst) == pid {
+            let e = rebacd::leader::fenced_execute(&lead, "select rebac.watch_alive()", &[])
+                .await
+                .unwrap_err();
+            assert!(fenced(&e), "a deposed leader cannot commit: {e:#}");
+        }
+        let mut took_over = false;
+        for _ in 0..200 {
+            if rebacd::leader::is_leader(&follow) {
+                took_over = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(took_over, "the other daemon takes over");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(leaders(), 1, "and only it leads");
+        rebacd::leader::fenced_execute(&follow, "select rebac.watch_alive()", &[])
+            .await
+            .expect("the new leader's write passes");
+        stop_tx.send(true).unwrap();
+        la.await.unwrap();
+        lb.await.unwrap();
+        // A shadow daemon takes its own lock, so it never displaces the live leader.
+        assert_eq!(
+            rebacd::leader::lock_key(
+                &Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Shadow))
+                    .await
+                    .unwrap()
+            ),
+            2
+        );
+    }
 
     // THE LOOKUP ENDPOINT behind a bearer token: no token or a wrong one is 401 and asks SpiceDB nothing; the right one
     // projects. /healthz stays open.

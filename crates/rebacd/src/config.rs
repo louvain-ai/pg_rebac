@@ -63,6 +63,15 @@ pub struct Config {
     /// (`<resource_type>:__rebac_watch_marker`) and waits for its revision; for a datastore whose revisions the daemon
     /// cannot compare. Needs a write-capable token and a direct relation that accepts the subject type.
     pub watch_marker: bool,
+    /// Run Watch, the closure check and the sweep only in the daemon holding the leader lock (crate::leader), so
+    /// several daemons can share a database. Off, every daemon runs them (one daemon per database, as before 0.3).
+    pub leader_election: bool,
+    /// A reopened Watch stream that has delivered nothing for this long has nothing left to replay, and counts as
+    /// current (for a store that sends no idle checkpoint, such as SpiceDB's in-memory datastore). 0: only a position
+    /// at or past the head revision counts.
+    pub watch_quiet_ms: u64,
+    /// How often a daemon that is not the leader tries the lock.
+    pub leader_retry_ms: u64,
     /// How often the live schema is re-read to re-derive the closure (besides Watch's schema notices).
     pub closure_check_ms: u64,
 }
@@ -94,6 +103,9 @@ impl Default for Config {
             watch: true,
             watch_resume_max_age_ms: 60 * 60_000,
             watch_marker: false,
+            leader_election: true,
+            watch_quiet_ms: 3_000,
+            leader_retry_ms: 2_000,
             closure_check_ms: 10_000,
         }
     }

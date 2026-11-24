@@ -21,6 +21,7 @@ pub mod closure;
 pub mod config;
 pub mod db;
 pub mod http;
+pub mod leader;
 pub mod logs;
 pub mod loops;
 pub mod project;
@@ -40,6 +41,8 @@ pub struct Ctx {
     pub closure_kick: tokio::sync::Notify,
     /// The Watch stream is connected and has applied every message it delivered (the heartbeat requires it).
     pub watch_current: std::sync::atomic::AtomicBool,
+    /// The backend pid of the connection holding the leader lock, or 0 when this daemon does not lead.
+    pub leader_pid: std::sync::atomic::AtomicI32,
 }
 
 impl Ctx {
@@ -59,6 +62,7 @@ impl Ctx {
             projection,
             closure_kick: tokio::sync::Notify::new(),
             watch_current: std::sync::atomic::AtomicBool::new(false),
+            leader_pid: std::sync::atomic::AtomicI32::new(0),
         })
     }
 }

@@ -182,7 +182,11 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(ctx: Arc<Ctx>) -> anyhow::Result<()> {
     // A Watch position before any loop projects anything, so a first start's gap precedes every lookup of this run.
-    if let Err(e) = loops::ensure_watch_position(&ctx).await {
+    // With leader election on, the leader's Watch stream stores it (a first stream with no position restarts from
+    // head and records the gap); a daemon that is not the leader must not record a gap of its own.
+    if ctx.config.leader_election {
+        tracing::debug!("leader election on: the leader's Watch stream stores the first position");
+    } else if let Err(e) = loops::ensure_watch_position(&ctx).await {
         tracing::warn!(error = %rebacd::logs::kind_of(&e), "could not store a Watch position at start; the Watch loop retries");
     }
     // Whether reads depend on this daemon's Watch stream (rebac.watch_ok's grace): only a live daemon says so.
@@ -212,6 +216,12 @@ async fn run(ctx: Arc<Ctx>) -> anyhow::Result<()> {
             tokio::spawn(loops::closure_loop(ctx.clone(), stop.clone())),
         ),
     ];
+    if ctx.config.leader_election {
+        tasks.push((
+            "leader",
+            tokio::spawn(rebacd::leader::leader_loop(ctx.clone(), stop.clone())),
+        ));
+    }
     if ctx.config.mode == Mode::Live {
         tasks.push((
             "relay",

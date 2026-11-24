@@ -136,6 +136,9 @@ pub async fn sweep_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
         if *stop.borrow() {
             return;
         }
+        if !crate::leader::is_leader(&ctx) {
+            continue;
+        }
         let r = async {
             let c = ctx.pool.get().await?;
             let row = c
@@ -208,6 +211,11 @@ pub async fn heartbeat_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
 pub async fn watch_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
     let mut failures = 0u32;
     while !*stop.borrow() {
+        if !crate::leader::is_leader(&ctx) {
+            ctx.watch_current.store(false, Ordering::SeqCst);
+            tokio::select! { _ = tokio::time::sleep(Duration::from_millis(200)) => {}, _ = stop.changed() => {} }
+            continue;
+        }
         let r = watch_once(&ctx, &mut stop).await;
         ctx.watch_current.store(false, Ordering::SeqCst);
         if *stop.borrow() {
@@ -309,20 +317,43 @@ pub async fn ensure_watch_position(ctx: &Ctx) -> anyhow::Result<()> {
     if !ctx.config.watch || ctx.config.mode != Mode::Live || resume_position(ctx).await?.is_some() {
         return Ok(());
     }
-    let mut stream = ctx.spicedb.watch(types_watched(ctx).await?, None).await?;
-    let first = tokio::time::timeout(ctx.config.deadline(), stream.message())
-        .await
-        .map_err(|_| anyhow::anyhow!("Watch sent nothing within the deadline"))??
-        .ok_or_else(|| anyhow::anyhow!("Watch ended before its first message"))?;
-    let token = first
-        .changes_through
-        .map(|t| t.token)
-        .ok_or_else(|| anyhow::anyhow!("Watch's first message has no position"))?;
+    // From SpiceDB's head revision, read directly: an idle store may send a new stream nothing to take it from.
+    let token = head_token(ctx).await?;
     ctx.pool
         .get()
         .await?
         .execute("select rebac.watch_restarted($1)", &[&token])
         .await?;
+    Ok(())
+}
+
+/// SpiceDB's head revision as a ZedToken, read-only (a fully consistent CheckPermission of a probe object; its answer
+/// is ignored).
+async fn head_token(ctx: &Ctx) -> anyhow::Result<String> {
+    let p = &ctx.projection;
+    let probe = |t: &str| format!("{t}:__rebac_head_probe");
+    Ok(ctx
+        .spicedb
+        .head_revision(
+            &probe(&p.resource_type),
+            &p.permission,
+            &probe(&p.subject_type),
+            ctx.config.deadline(),
+        )
+        .await?)
+}
+
+/// The stream is caught up: current as of when the head was read (`opened`), not now, since what was committed after
+/// it may still be in flight.
+async fn mark_caught_up(ctx: &Ctx, opened: std::time::Instant) -> anyhow::Result<()> {
+    ctx.watch_current.store(true, Ordering::SeqCst);
+    let since_ms = opened.elapsed().as_secs_f64() * 1000.0;
+    crate::leader::fenced_execute(
+        ctx,
+        "select rebac.watch_alive(now() - $1 * interval '1 millisecond')",
+        &[&since_ms],
+    )
+    .await?;
     Ok(())
 }
 
@@ -348,17 +379,7 @@ async fn catch_up_target(ctx: &Ctx) -> anyhow::Result<CatchUp> {
     if ctx.config.watch_marker {
         return Ok(CatchUp::Marker(write_marker(ctx).await?));
     }
-    let p = &ctx.projection;
-    let probe = |t: &str| format!("{t}:__rebac_head_probe");
-    let head = ctx
-        .spicedb
-        .head_revision(
-            &probe(&p.resource_type),
-            &p.permission,
-            &probe(&p.subject_type),
-            ctx.config.deadline(),
-        )
-        .await?;
+    let head = head_token(ctx).await?;
     match crate::revision::of_token(&head) {
         Some(r) => Ok(CatchUp::Past(r)),
         None => anyhow::bail!(
@@ -443,44 +464,97 @@ fn watch_rows(
 }
 
 async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Result<Resume> {
-    let from = resume_position(ctx).await?;
-    let restart = from.is_none();
+    let mut from = resume_position(ctx).await?;
     let types = types_watched(ctx).await?;
     let apply = ctx.config.mode == Mode::Live;
-    // Opening the stream waits for SpiceDB's first message, so it races the stop signal too.
-    let opened = tokio::select! {
-        s = ctx.spicedb.watch(types, from.clone()) => s,
-        _ = stop.changed() => return Ok(Resume::Same),
+    // NO POSITION TO RESUME: restart from SpiceDB's head revision, read directly, and record the gap before anything
+    // is applied, so the stream below is an ordinary resumed one (an idle store may send a stream opened at "now"
+    // nothing at all, not even the reply that completes the open).
+    if from.is_none() && apply {
+        let t = head_token(ctx).await?;
+        crate::leader::fenced_execute(ctx, "select rebac.watch_restarted($1)", &[&t]).await?;
+        tracing::warn!("Watch restarted from SpiceDB's head: sets looked up before now fail closed until the forced sweep re-projects them");
+        from = Some(t);
+    }
+    let restart = from.is_none();
+    // CAUGHT UP. A resumed stream first replays what happened while it was down, and nothing in a Watch message says
+    // where that replay ends (SpiceDB sends a checkpoint after every revision it delivers, replayed or not). So the
+    // daemon reads SpiceDB's head revision first (a fully consistent CheckPermission, read-only) and keeps the stream
+    // "not current" until a message's position is at or past it (crate::revision): Watch delivers in revision order,
+    // so by then every change committed before the stream opened has been delivered and (in order) applied. Until
+    // then the heartbeat stays off and reads stay closed through the whole replay. `watch_marker = true` instead
+    // touches a marker relationship once the stream is open and waits for its revision, for a datastore whose
+    // revisions crate::revision cannot compare.
+    //
+    // A QUIET STREAM: a store with nothing to replay may send nothing at all, not even the response headers that
+    // complete the open (SpiceDB's in-memory datastore sends no idle checkpoint, and its head revision is a clock
+    // reading that no position reaches until the next change). A resumed stream that has delivered nothing for
+    // `watch_quiet_ms` (well above SpiceDB's 1 s Watch heartbeat, after which a datastore that heartbeats has sent a
+    // checkpoint at the head) has nothing left to replay, and counts as current.
+    let mut caught_up = false;
+    let opened = std::time::Instant::now();
+    let quiet = Duration::from_millis(ctx.config.watch_quiet_ms);
+    let mut alive = tokio::time::interval(Duration::from_millis(ctx.config.heartbeat_ms.max(100)));
+    let mut target = if apply && !ctx.config.watch_marker {
+        Some(catch_up_target(ctx).await?)
+    } else {
+        None
     };
-    let mut stream = match opened {
+    // AN IDLE STORE whose position is already at or past the head: nothing to replay, current at once.
+    if let (Some(t), Some(f)) = (&target, &from) {
+        if t.reached(Some(f)) {
+            caught_up = true;
+            mark_caught_up(ctx, opened).await?;
+            tracing::debug!("Watch caught up at open: nothing to replay");
+        }
+    }
+    let quiet_ok = apply && !restart && !quiet.is_zero() && target.is_some();
+    let open = ctx.spicedb.watch(types, from.clone());
+    tokio::pin!(open);
+    let quiet_at = tokio::time::Instant::now() + quiet;
+    let opened_stream = loop {
+        tokio::select! {
+            s = &mut open => break s,
+            _ = tokio::time::sleep_until(quiet_at), if quiet_ok && !caught_up => {
+                caught_up = true;
+                mark_caught_up(ctx, opened).await?;
+                tracing::debug!("Watch caught up: the resumed stream has nothing to deliver");
+            }
+            _ = alive.tick(), if caught_up && apply => {
+                if !crate::leader::is_leader(ctx) {
+                    anyhow::bail!("no longer the leader: stopping the Watch stream");
+                }
+                crate::leader::fenced_execute(ctx, "select rebac.watch_alive()", &[]).await?;
+            }
+            _ = stop.changed() => return Ok(Resume::Same),
+        }
+    };
+    let mut stream = match opened_stream {
         Ok(s) => s,
         Err(e) if !restart && position_refused(&e) => return drop_position(ctx, &e).await,
         Err(e) => return Err(e.into()),
     };
     let mut first = true;
-    // CAUGHT UP. A resumed stream first replays what happened while it was down, and nothing in a Watch message says
-    // where that replay ends (SpiceDB sends a checkpoint after every revision it delivers, replayed or not). So, once
-    // the stream is open, the daemon reads SpiceDB's head revision (a fully consistent CheckPermission, read-only)
-    // and keeps the stream "not current" until a message's position is at or past it (crate::revision): Watch
-    // delivers in revision order, so by then every change committed before the stream opened has been delivered and
-    // (in order) applied. Until then the heartbeat stays off and reads stay closed through the whole replay.
-    // `watch_marker = true` instead touches a marker relationship and waits for its own revision, for a datastore
-    // whose revisions crate::revision cannot compare.
-    let mut caught_up = false;
-    let opened = std::time::Instant::now();
-    let target = if apply {
-        Some(catch_up_target(ctx).await?)
-    } else {
-        None
-    };
+    if apply && target.is_none() {
+        target = Some(catch_up_target(ctx).await?);
+    }
     let catch_up_by = tokio::time::Instant::now() + 6 * ctx.config.deadline();
-    let mut alive = tokio::time::interval(Duration::from_millis(ctx.config.heartbeat_ms.max(100)));
+    let mut last_msg = tokio::time::Instant::now();
     loop {
         let msg = tokio::select! {
             m = stream.message() => m,
             _ = alive.tick(), if caught_up && apply => {
                 // Connected, and everything delivered is applied: the position is current as of now.
-                ctx.pool.get().await?.execute("select rebac.watch_alive()", &[]).await?;
+                if !crate::leader::is_leader(ctx) {
+                    anyhow::bail!("no longer the leader: stopping the Watch stream");
+                }
+                crate::leader::fenced_execute(ctx, "select rebac.watch_alive()", &[]).await?;
+                continue;
+            }
+            _ = tokio::time::sleep_until(last_msg + quiet), if quiet_ok && !caught_up => {
+                caught_up = true;
+                mark_caught_up(ctx, opened).await?;
+                tracing::debug!("Watch caught up: the stream is quiet, nothing left to replay");
                 continue;
             }
             _ = tokio::time::sleep_until(catch_up_by), if apply && !caught_up => {
@@ -488,6 +562,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
             }
             _ = stop.changed() => return Ok(Resume::Same),
         };
+        last_msg = tokio::time::Instant::now();
         let msg = match msg {
             Ok(Some(m)) => m,
             Ok(None) => return Ok(Resume::Same),
@@ -502,16 +577,13 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
             let Some(t) = &token else {
                 anyhow::bail!("Watch's first message has no position");
             };
-            ctx.pool
-                .get()
-                .await?
-                .execute("select rebac.watch_restarted($1)", &[t])
-                .await?;
+            crate::leader::fenced_execute(ctx, "select rebac.watch_restarted($1)", &[t]).await?;
             tracing::warn!("Watch restarted from SpiceDB's head: sets looked up before now fail closed until the forced sweep re-projects them");
         }
         let (ops, resources, relations, subjects) = watch_rows(&msg);
         let mut c = ctx.pool.get().await?;
         let tx = c.transaction().await?;
+        crate::leader::assert_leader(ctx, &tx).await?;
         let row = tx
             .query_one(
                 "select external, narrowed from rebac.apply_watch($1, $2, $3, $4, $5, $6)",
@@ -523,17 +595,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
         first = false;
         if !caught_up && target.as_ref().is_some_and(|t| t.reached(token.as_deref())) {
             caught_up = true;
-            ctx.watch_current.store(true, Ordering::SeqCst);
-            // Current as of when the head was read, not now: what was committed since may still be in flight.
-            let since_ms = opened.elapsed().as_secs_f64() * 1000.0;
-            ctx.pool
-                .get()
-                .await?
-                .execute(
-                    "select rebac.watch_alive(now() - $1 * interval '1 millisecond')",
-                    &[&since_ms],
-                )
-                .await?;
+            mark_caught_up(ctx, opened).await?;
             tracing::debug!("Watch caught up: the stream is past the revision read when it opened");
         }
         if external > 0 {
@@ -555,14 +617,12 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
 /// SpiceDB refused the stored position: forget it, so the next stream starts from head and records the gap.
 async fn drop_position(ctx: &Ctx, e: &tonic::Status) -> anyhow::Result<Resume> {
     tracing::warn!(code = ?e.code(), "SpiceDB refused the Watch position: restarting from head");
-    ctx.pool
-        .get()
-        .await?
-        .execute(
-            "update rebac.watch_state set zedtoken = null where scope = $1",
-            &[&scope(ctx)],
-        )
-        .await?;
+    crate::leader::fenced_execute(
+        ctx,
+        "update rebac.watch_state set zedtoken = null where scope = $1",
+        &[&scope(ctx)],
+    )
+    .await?;
     Ok(Resume::Reset)
 }
 
@@ -585,6 +645,9 @@ pub async fn closure_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
         }
         if *stop.borrow() {
             break;
+        }
+        if !crate::leader::is_leader(&ctx) {
+            continue;
         }
         let r = async {
             let text = ctx.spicedb.read_schema(ctx.config.deadline()).await?;
