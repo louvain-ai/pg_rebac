@@ -326,7 +326,49 @@ pub async fn ensure_watch_position(ctx: &Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The object id of the marker relationship the Watch loop touches to learn where a replay ends. It carries no tenant
+/// Where a reopened stream counts as caught up: past a head revision, or at the marker's own revision.
+enum CatchUp {
+    Past(crate::revision::Revision),
+    Marker(String),
+}
+
+impl CatchUp {
+    fn reached(&self, token: Option<&str>) -> bool {
+        let Some(token) = token else { return false };
+        match self {
+            CatchUp::Marker(m) => token == m,
+            CatchUp::Past(head) => crate::revision::of_token(token)
+                .and_then(|r| crate::revision::covers(&r, head))
+                .unwrap_or(false),
+        }
+    }
+}
+
+async fn catch_up_target(ctx: &Ctx) -> anyhow::Result<CatchUp> {
+    if ctx.config.watch_marker {
+        return Ok(CatchUp::Marker(write_marker(ctx).await?));
+    }
+    let p = &ctx.projection;
+    let probe = |t: &str| format!("{t}:__rebac_head_probe");
+    let head = ctx
+        .spicedb
+        .head_revision(
+            &probe(&p.resource_type),
+            &p.permission,
+            &probe(&p.subject_type),
+            ctx.config.deadline(),
+        )
+        .await?;
+    match crate::revision::of_token(&head) {
+        Some(r) => Ok(CatchUp::Past(r)),
+        None => anyhow::bail!(
+            "cannot read a revision from SpiceDB's ZedToken, so a resumed Watch stream cannot tell when its replay is done; \
+             set watch_marker = true (reads stay closed meanwhile)"
+        ),
+    }
+}
+
+/// The object id of the marker relationship the Watch loop touches (`watch_marker = true`) to learn where a replay ends. It carries no tenant
 /// prefix, so it maps to nobody (G5); the loop also drops it before `rebac.apply_watch` sees it.
 pub const WATCH_MARKER: &str = "__rebac_watch_marker";
 
@@ -418,13 +460,15 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
     let mut first = true;
     // CAUGHT UP. A resumed stream first replays what happened while it was down, and nothing in a Watch message says
     // where that replay ends (SpiceDB sends a checkpoint after every revision it delivers, replayed or not). So, once
-    // the stream is open, the daemon TOUCHES a marker relationship and keeps the stream "not current" until Watch
-    // delivers the marker's own revision: Watch delivers in revision order, so by then every change committed before
-    // the stream opened has been delivered and (in order) applied. Until then the heartbeat stays off and reads stay
-    // closed through the whole replay, not just its first message.
+    // the stream is open, the daemon reads SpiceDB's head revision (a fully consistent CheckPermission, read-only)
+    // and keeps the stream "not current" until a message's position is at or past it (crate::revision): Watch
+    // delivers in revision order, so by then every change committed before the stream opened has been delivered and
+    // (in order) applied. Until then the heartbeat stays off and reads stay closed through the whole replay.
+    // `watch_marker = true` instead touches a marker relationship and waits for its own revision, for a datastore
+    // whose revisions crate::revision cannot compare.
     let mut caught_up = false;
-    let marker = if apply {
-        Some(write_marker(ctx).await?)
+    let target = if apply {
+        Some(catch_up_target(ctx).await?)
     } else {
         None
     };
@@ -439,7 +483,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
                 continue;
             }
             _ = tokio::time::sleep_until(catch_up_by), if apply && !caught_up => {
-                anyhow::bail!("Watch did not deliver its marker within {:?}; reopening (reads stay closed)", 6 * ctx.config.deadline());
+                anyhow::bail!("Watch did not reach the revision read when it opened within {:?}; reopening (reads stay closed)", 6 * ctx.config.deadline());
             }
             _ = stop.changed() => return Ok(Resume::Same),
         };
@@ -476,7 +520,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
         tx.commit().await?;
         let (external, narrowed): (i32, i32) = (row.get(0), row.get(1));
         first = false;
-        if !caught_up && marker.is_some() && token.as_deref() == marker.as_deref() {
+        if !caught_up && target.as_ref().is_some_and(|t| t.reached(token.as_deref())) {
             caught_up = true;
             ctx.watch_current.store(true, Ordering::SeqCst);
             ctx.pool
@@ -484,7 +528,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
                 .await?
                 .execute("select rebac.watch_alive()", &[])
                 .await?;
-            tracing::debug!("Watch caught up: its marker was delivered");
+            tracing::debug!("Watch caught up: the stream is past the revision read when it opened");
         }
         if external > 0 {
             tracing::info!(

@@ -42,8 +42,9 @@ The SQL is installed separately, with `psql` or your migrations. No published im
   them.
   A schema change on the stream starts a closure re-check at once, and the stream reopens on the new closure's types.
   A reopened stream replays what happened while it was down, and reads stay closed until the whole replay is applied:
-  the daemon touches a marker relationship (`<resource_type>:__rebac_watch_marker`) when the stream opens, and counts
-  the stream current only once Watch delivers that marker.
+  the daemon reads SpiceDB's head revision when the stream opens (a fully consistent check, read-only) and counts the
+  stream current only once its position reaches that revision. `watch_marker = true` waits for a marker
+  relationship it touches instead, for a datastore whose revisions it cannot compare.
 - **Closure.** Re-reads the live schema every `closure_check_ms` (10 seconds), and at once on Watch's notice, so a
   schema change is caught with `watch = false` too. See [schema changes while running](#schema-changes-while-running).
 - **HTTP.** `POST /lookup`, `GET /healthz` and `GET /status` on `listen`.
@@ -81,6 +82,8 @@ watch             = true
 | `sweep_interval_ms` | 900000 | |
 | `sweep_settle_ms` | 300000 | |
 | `closure_check_ms` | 10000 | How often the live schema is re-read for a closure change |
+| `watch_resume_max_age_ms` | 3600000 | The oldest Watch position resumed from; older restarts from head with a gap |
+| `watch_marker` | false | A reopened stream waits for a marker relationship it touches, not for the head revision |
 
 What is projected lives in the `rebac.config` table, which the SQL and the daemon both read, so the two cannot
 disagree:

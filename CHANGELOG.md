@@ -4,9 +4,9 @@
 
 - **Reads stay closed through a Watch replay (fix).** In 0.2.0 a reconnected Watch stream counted as current, and
   the heartbeat resumed, after its first replayed message, so reads reopened while revocations made during the outage
-  were still being applied. The daemon now touches a marker relationship (`<resource_type>:__rebac_watch_marker`) when
-  the stream opens and counts it current only once Watch delivers the marker's revision.
-
+  were still being applied. The daemon now reads SpiceDB's head revision when the stream opens (a fully consistent
+  CheckPermission, read-only) and counts the stream current only once its position reaches it. `watch_marker` (new,
+  off) waits for a marker relationship instead, for a datastore whose revisions cannot be compared.
 - **`POST /lookup` and `GET /status` can require a bearer token** (`lookup_token_env`, the NAME of the variable that
   holds it). A lookup's reply names how many containers a principal reads, and any caller could make the daemon ask
   SpiceDB; with a token set, anything else is a 401. A non-loopback `listen` without a token logs a warning.

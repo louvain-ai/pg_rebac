@@ -115,13 +115,17 @@
       heartbeat's own SpiceDB deadline when the connection died silently (HTTP/2 keepalive ends such a stream within
       10 s). The message is retried from the same position; nothing is half-applied.
     - **On reconnect** the stream resumes from the position applied through, so a change made while it was down is
-      replayed and applied in order. Reads stay closed through the WHOLE replay: once the stream is open, the daemon
-      touches a marker relationship (`<resource_type>:__rebac_watch_marker`, on a direct relation of the projected
-      type, subject `<subject_type>:__rebac_watch_marker`), and the stream counts as current, and the heartbeat
-      resumes, only when Watch delivers the marker's own revision. Watch delivers in revision order, so by then every
-      change committed before the stream reopened has been applied. A marker not delivered within six times
-      `deadline_ms` reopens the stream. The marker carries no tenant prefix and is dropped before `rebac.apply_watch`,
-      so it grants nobody anything; the projected relation must accept `<subject_type>` directly.
+      replayed and applied in order. Reads stay closed through the WHOLE replay. When the stream opens, the daemon
+      reads SpiceDB's head revision with a fully consistent CheckPermission (read-only; its answer is ignored), and
+      the stream counts as current, and the heartbeat resumes, only once a message's position is at or past that
+      revision. Watch delivers in revision order, so by then every change committed before the stream reopened has
+      been applied. Revisions are compared as SpiceDB's datastores write them: as decimals (in memory, MySQL,
+      CockroachDB, Spanner) or as Postgres snapshots (a position covers the head once its `xmin` reaches the head's
+      `xmax`; the Postgres datastore reports its position through an idle checkpoint about every 5 s, so a reconnect
+      there stays closed up to that long). A position not reached within six times `deadline_ms` reopens the stream.
+      A token whose revision cannot be read keeps reads closed and says to set `watch_marker = true`: the daemon then
+      touches `<resource_type>:__rebac_watch_marker` on a direct relation (subject `<subject_type>:__rebac_watch_marker`,
+      no tenant prefix, so it grants nobody, and dropped before `rebac.apply_watch`) and waits for its revision.
     - **A position that cannot be resumed**: none stored (a first start, or the first start after upgrading from
       0.1, whose observe-only position applied nothing), one SpiceDB refuses (`INVALID_ARGUMENT`, `OUT_OF_RANGE`,
       `FAILED_PRECONDITION`, `NOT_FOUND`), or one whose last confirmation is older than `watch_resume_max_age_ms`

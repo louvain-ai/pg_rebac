@@ -528,7 +528,8 @@ async fn the_daemon_end_to_end() {
     );
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
-    for _ in 0..100 {
+    // Up to 15 s: the Postgres datastore reports its head through an idle checkpoint about every 5 s.
+    for _ in 0..300 {
         if wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
@@ -663,7 +664,7 @@ async fn the_daemon_end_to_end() {
     // THE REPLAY IS NOT CURRENT: the stream is current (and the heartbeat may beat) only once SpiceDB's checkpoint says
     // every change through it was delivered, so at the first instant it is current, the whole backlog is narrowed.
     let mut current = false;
-    for _ in 0..400 {
+    for _ in 0..3000 {
         if wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
             current = true;
             break;
@@ -693,7 +694,7 @@ async fn the_daemon_end_to_end() {
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
     let mut gapped = false;
-    for _ in 0..100 {
+    for _ in 0..300 {
         let g: bool = ctx.pool.get().await.unwrap()
             .query_one("select coalesce((select gap_at > now() - interval '10 seconds' and zedtoken <> 'not-a-zedtoken'
                         from rebac.watch_state where scope = 'watch_applied'), false)", &[])

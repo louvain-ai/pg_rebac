@@ -58,6 +58,11 @@ pub struct Config {
     /// up before fail closed until re-projected), because SpiceDB may have garbage-collected the changes in between
     /// without an error. Keep it below SpiceDB's `--datastore-gc-window` (24 h by default).
     pub watch_resume_max_age_ms: u64,
+    /// How a reopened Watch stream learns its replay is done. false (the default): it reads SpiceDB's head revision
+    /// (read-only) and waits until the stream is past it. true: it TOUCHES a marker relationship
+    /// (`<resource_type>:__rebac_watch_marker`) and waits for its revision; for a datastore whose revisions the daemon
+    /// cannot compare. Needs a write-capable token and a direct relation that accepts the subject type.
+    pub watch_marker: bool,
     /// How often the live schema is re-read to re-derive the closure (besides Watch's schema notices).
     pub closure_check_ms: u64,
 }
@@ -88,6 +93,7 @@ impl Default for Config {
             sweep_settle_ms: 5 * 60_000,
             watch: true,
             watch_resume_max_age_ms: 60 * 60_000,
+            watch_marker: false,
             closure_check_ms: 10_000,
         }
     }

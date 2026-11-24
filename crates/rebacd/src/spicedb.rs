@@ -339,6 +339,32 @@ impl SpiceDb {
         }
     }
 
+    /// SpiceDB's current revision, read-only: a fully consistent CheckPermission (of `resource#permission@subject`,
+    /// whose answer is ignored) is evaluated at the head revision and says which (`checked_at`).
+    pub async fn head_revision(
+        &self,
+        resource: &str,
+        permission: &str,
+        subject_ref: &str,
+        deadline: Duration,
+    ) -> Result<String, Status> {
+        let mut perms = self.perms.clone();
+        let msg = pb::CheckPermissionRequest {
+            consistency: Some(pb::Consistency {
+                requirement: Some(pb::consistency::Requirement::FullyConsistent(true)),
+            }),
+            resource: Some(object(resource)?),
+            permission: permission.into(),
+            subject: Some(subject(subject_ref)?),
+            ..Default::default()
+        };
+        let resp = bounded(deadline, perms.check_permission(Self::req(msg, deadline))).await?;
+        resp.into_inner()
+            .checked_at
+            .map(|t| t.token)
+            .ok_or_else(|| Status::internal("CheckPermission returned no checked_at"))
+    }
+
     /// The Watch stream from a position (or from now).
     pub async fn watch(
         &self,
