@@ -448,9 +448,9 @@ create or replace function rebac.fenced_ids(p text, tbl regclass, q anyelement, 
                                             embedding_col text default 'embedding', tenant_col text default null,
                                             op text default '<=>', exact_below integer default null)
 returns table (id text, distance float8, path text)
-language plpgsql volatile
-set hnsw.iterative_scan = 'relaxed_order' as $$
+language plpgsql volatile as $$
 declare
+  prior text;
   thr integer := coalesce(exact_below, coalesce(rebac.setting('exact_below_rows'), '5000')::integer);
   arr text[];
   tenant_filter text := '';
@@ -483,12 +483,21 @@ begin
     raise exception 'rebac.fenced_ids: the ANN path needs pgvector 0.8 or later (hnsw.iterative_scan)'
       using errcode = 'RB422', hint = 'without iterative scans a fenced HNSW scan silently returns fewer than k rows';
   end if;
+  -- relaxed_order for this one query, then the caller's value back. Set here at run time, not as a function-level SET:
+  -- a role that is not a superuser may not set a placeholder, which hnsw.iterative_scan is until pgvector's library is
+  -- loaded, so a SET clause would refuse the install itself on hosted Postgres. Loading the library first makes it a
+  -- real, user-settable parameter.
+  execute (select format('select %L::%I.vector', '[1]', n.nspname)
+           from pg_extension e join pg_namespace n on n.oid = e.extnamespace where e.extname = 'vector');
+  prior := current_setting('hnsw.iterative_scan');
+  perform set_config('hnsw.iterative_scan', 'relaxed_order', true);
   -- relaxed_order returns the k rows slightly out of order: they are put back in order here.
   return query execute format(
     'select s.i, s.d, ''ann''::text from (select %I::text as i, (%I %s $1)::float8 as d from %s
        where %s%I in (select * from rebac.readable_set($2)) order by %I %s $1 limit $3) s order by s.d',
     id_col, embedding_col, op, tbl, tenant_filter, container_col, embedding_col, op)
     using q, p, k;
+  perform set_config('hnsw.iterative_scan', prior, true);
 end $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
