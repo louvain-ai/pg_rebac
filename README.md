@@ -9,7 +9,7 @@
 [![Docs: pgrebac.com](https://img.shields.io/badge/docs-pgrebac.com-4a3fd0)](https://pgrebac.com)
 
 <p align="center">
-  <img src="docs/img/two-readers.svg" width="760" alt="The same full-text query run as two people. alice, who reads handbook and payroll, gets five rows from those two containers; bob, who reads handbook and deals, gets five rows from his. Filtered after retrieval instead, bob would get one row of five, because a container he cannot read takes the other four places.">
+  <img src="docs/img/two-readers.svg" width="760" alt="The same full-text query run as two people. alice, who reads handbook and payroll, gets five rows from those two containers; bob, who reads handbook and deals, gets five rows from his. Filtered after retrieval instead, bob would get one row of five, because rows from containers he cannot read (board and payroll) take the other four places.">
 </p>
 
 SpiceDB stays the authority for who may read what. pg_rebac keeps a local, indexed projection of one permission, and
