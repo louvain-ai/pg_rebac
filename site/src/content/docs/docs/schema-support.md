@@ -7,7 +7,7 @@ pg_rebac projects one permission of one resource type, `container#view` by defau
 SpiceDB schema and works out which relations can change that permission: the closure. It stores them in
 `rebac.view_relation`, which tells `rebac.write` what to narrow and the relay what to refresh.
 
-## Supported (slice 1)
+## Supported
 
 The projected permission may be any union (`+`) of:
 
@@ -68,13 +68,13 @@ supported again ([schema changes while running](/docs/rebacd/#schema-changes-whi
 | Construct | Reason |
 |---|---|
 | Exclusion (`a - b`) | Not monotone: removing a tuple can grant. |
-| Intersection (`a & b`) | Not supported in slice 1. |
-| Intersection arrow (`.all()`) | Not supported in slice 1. |
+| Intersection (`a & b`) | Not supported. |
+| Intersection arrow (`.all()`) | Not supported. |
 | Caveats (`with some_caveat`) | A caveated relationship cannot be evaluated locally. |
 | Expiring relationships (`with expiration`) | Cannot be evaluated locally. |
 | Wildcards (`user:*`) on a relation reached through an arrow, or inside a subject set | Not supported. (In 0.1.x every wildcard is refused: a wildcard grant cannot be narrowed per principal.) |
 | Nested subject sets (`group#member` holding `group#member`) | A set's members must be plain object types. |
 | A subject set naming a permission | It must name a relation of a defined type. |
-| An arrow more than one hop from the projected type | Not supported in slice 1. |
+| An arrow more than one hop from the projected type | Not supported. |
 
 Other permissions on the same type, such as `edit`, are not part of the closure and are not checked.

@@ -78,4 +78,4 @@ time. To step back:
 - **Live to shadow:** restart with `--shadow` (or `mode = "shadow"`). Relaying stops and only the shadow table is
   written.
 
-pg_rebac has no uninstall script in slice 1.
+pg_rebac has no uninstall script.

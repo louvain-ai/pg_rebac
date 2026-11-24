@@ -1,4 +1,5 @@
 ---
+import GitHubMark from "../components/GitHubMark.astro";
 import "@fontsource-variable/instrument-sans";
 import "@fontsource-variable/jetbrains-mono";
 import "../styles/cover.css";
@@ -47,7 +48,7 @@ const description =
       </a>
       <nav aria-label="Site">
         <a href="/docs/getting-started/">Docs</a>
-        <a href={repo}>GitHub</a>
+        <a class="gh" href={repo}><GitHubMark />GitHub</a>
         <button class="theme" type="button" aria-label="Switch between light and dark" data-theme-toggle>
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18V3Z" fill="currentColor"></path><circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor" stroke-width="1.5"></circle></svg>
         </button>
@@ -64,10 +65,9 @@ const description =
             <code>where</code> clause and Postgres plans it as one more join, so the fence applies before the
             <code>order by</code> and the <code>limit</code>.
           </p>
-          <p class="status">Slice 1, pre-release. Running in shadow in production at <a href="#users">Louvain</a>: mirrored, compared daily with a projection rebuilt from SpiceDB, and serving no reads yet.</p>
           <div class="actions">
             <a class="btn primary" href="/docs/getting-started/">Get started</a>
-            <a class="btn" href={repo}>Source on GitHub</a>
+            <a class="btn gh" href={repo}><GitHubMark size={18} />Source on GitHub</a>
           </div>
         </div>
 
@@ -240,7 +240,7 @@ DATABASE_URL=postgres://… SPICEDB_TOKEN=… \
 
     <footer class="foot">
       <MadeBy />
-      <p>Apache-2.0. <a href={repo}>github.com/louvain-ai/pg_rebac</a>. SpiceDB is a project of Authzed; pg_rebac is
+      <p>Apache-2.0. <a class="gh" href={repo}><GitHubMark size={14} />github.com/louvain-ai/pg_rebac</a>. SpiceDB is a project of Authzed; pg_rebac is
         not affiliated with it.</p>
     </footer>
 

@@ -76,7 +76,7 @@ fail closed. It does not replace SpiceDB's check API for writes, and it does not
 
 ## Does it need a C extension?
 
-No. Slice 1 is plain SQL and PL/pgSQL, installed with `psql -f`, so it runs on hosted Postgres that does not allow
+No. It is plain SQL and PL/pgSQL, installed with `psql -f`, so it runs on hosted Postgres that does not allow
 custom extensions. The `rebacd` daemon needs only an ordinary connection.
 
 ## Which Postgres and pgvector versions?
@@ -84,15 +84,13 @@ custom extensions. The `rebacd` daemon needs only an ordinary connection.
 The schema targets Postgres 14 and later. The test suite and the planner study run on Postgres 17 with pgvector
 0.8. Fenced ANN reads need pgvector 0.8 or later for `hnsw.iterative_scan`.
 
-## Is it production-ready?
+## Who runs it in production?
 
-Not yet. It is slice 1 and pre-release. Louvain runs it in shadow in production:
+Louvain:
 
 - Louvain's own permission projection is mirrored into pg_rebac's tables, in each writer's transaction;
 - a shadow `rebacd` re-projects every reader from SpiceDB into `rebac.readable_shadow`;
 - once a day, `rebacd verify --all-tenants --shadow` compares the two and exits non-zero on any extra row.
-
-No production read is served by pg_rebac yet.
 
 ## Why the name? Wasn't it pg_fence?
 

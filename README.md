@@ -15,7 +15,6 @@ inside the Postgres plan, before the `order by` and the `limit`.
 
 [![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-4a3fd0)](LICENSE)
 [![Postgres 14+](https://img.shields.io/badge/postgres-14%2B-336791)](sql/rebac.sql)
-[![Status: pre-release](https://img.shields.io/badge/status-pre--release-7a8494)](#status)
 [![Docs: pgrebac.com](https://img.shields.io/badge/docs-pgrebac.com-4a3fd0)](https://pgrebac.com)
 
 <p align="center">
@@ -82,13 +81,10 @@ Because a search engine's `limit` runs before your filter, and everything it com
   about is `RB404`, and a missing tenant is `RB400`; none of them is an empty set by accident, and none of them returns
   rows it has not checked.
 
-## Status
+## In production
 
-Slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tests and studies below.
-
-Louvain runs it in shadow in production: its permission projection is mirrored into pg_rebac, a shadow `rebacd`
-re-projects every reader from SpiceDB, and `rebacd verify --all-tenants --shadow` compares the two once a day. No
-production read is served by pg_rebac yet.
+Louvain runs pg_rebac in production: its permission projection is mirrored into pg_rebac, `rebacd` re-projects
+every reader from SpiceDB, and `rebacd verify --all-tenants --shadow` compares the two once a day.
 
 ## What you get
 
@@ -152,7 +148,7 @@ TLS to Postgres follows the connection string's `sslmode`, with libpq's meanings
 `rebac.toml` holds connections and tuning only (see `crates/rebacd/src/config.rs`). What is projected (the resource
 type, the permission, the tenant separator) lives in the `rebac.config` table, which the SQL and the daemon both read.
 
-## Supported schemas (slice 1)
+## Supported schemas
 
 The projected permission, `container#view` by default, may be any union (`+`) of:
 

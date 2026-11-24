@@ -3,7 +3,7 @@ title: Getting started
 description: Install pg_rebac's SQL, project a first readable set, and fence a pgvector query with it.
 ---
 
-pg_rebac is slice 1 and pre-release. Everything on this page was run against Postgres 17 with pgvector 0.8.
+Everything on this page was run against Postgres 17 with pgvector 0.8.
 
 ## See it work in one command
 
