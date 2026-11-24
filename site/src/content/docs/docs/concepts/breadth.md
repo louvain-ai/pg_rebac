@@ -68,4 +68,4 @@ reader.
 ## Not settled yet
 
 A planner support function that supplies each principal's selectivity, so Postgres could choose the path itself,
-is future work. So are measurements on Postgres 18 and on tenants with skewed passages per container.
+is future work. So is a measurement on Postgres 18. Skewed containers were measured in the 768-dimension run on the [performance page](/docs/performance/).

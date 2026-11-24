@@ -7,6 +7,12 @@ The design's largest risk was that an inlined fence next to an HNSW scan would p
 middling breadth. This study measures it. The numbers below are from one machine and one synthetic data set; treat
 them as the shape of the trade-off, and measure your own.
 
+## Limits
+
+The numbers below come from synthetic, clustered 128-dimension embeddings with a warm cache. Each cell is the median
+of 10 queries from one client, with no p95 or p99 and no concurrency, on one 4-CPU machine. Treat them as the shape
+of the trade-off, not a capacity figure.
+
 ## Method
 
 - Postgres 17, pgvector 0.8.6, 4 CPUs, 6 GB, `shared_buffers = 1GB`, JIT off. Everything cached in memory.
@@ -54,6 +60,30 @@ full table, with max latency, the `in`-form exact path and `ef_search = 200`, is
 5. **A larger `ef_search`** raised the broad readers' recall (0.84 to 0.97 at 100% breadth) and changed little for
    narrow ones, whose recall is bounded by the scan limit.
 
+## A second run at 768 dimensions
+
+`examples/hybrid-pgvector-realistic/` reruns the study at 768 dimensions over 500,000 passages, with skewed
+container sizes (median 8 passages, largest 2,486). It reports p50, p95 and p99 over 300 queries per cell, plus a
+concurrency run. The data is still synthetic, with a warm cache on one 10-CPU machine and `fsync` off. The full
+table is in `docs/planner.md`.
+
+| Breadth | ANN, relaxed_order p50 / p99 ms | rows/k | Exact (array) p50 ms |
+|---|---|---|---|
+| 0.1% | 116 / 264 | 0.88 | 6.7 |
+| 1% | 48 / 79 | 1.00 | 44 |
+| 5% | 29 / 61 | 1.00 | 188 |
+| 10% | 18 / 30 | 1.00 | 276 |
+| 20% | 6.5 / 13 | 1.00 | 508 |
+| 50% | 2.8 / 5.3 | 1.00 | 1,223 |
+
+- **The fence still returns all k rows** from 1% breadth up, and the plan does not change. At 768 dimensions the
+  middle breadths are slower than at 128, so the 4 to 7 ms figure applies to the 128-dimension run only.
+- **Concurrency.** Fenced reads levelled at about 420 to 450 queries a second from 8 clients, with p99 under
+  110 ms. At 32 clients the machine was CPU-bound and p99 reached 330 to 480 ms.
+- **Recall is not meaningful here.** On this data unfenced HNSW itself scored 0.09, because isotropic noise in 768
+  dimensions leaves neighbours nearly tied. Fenced recall tracked unfenced recall at the same `ef_search`, so the
+  fence costs no recall of its own. The data cannot say more than that.
+
 ## Write side: a refresh is a diff
 
 A refresh re-projects a principal from SpiceDB. `rebac.project` writes only the difference from the stored set,
@@ -77,7 +107,6 @@ tuple, no index entry and no WAL. Measured with `examples/project-churn/churn.sq
 
 - A planner support function supplying per-principal selectivity, so Postgres could choose the path itself.
 - Postgres 18.
-- Tenants with skewed passages per container.
 - Write-side costs of narrowing at commit and of relay throughput.
 
 ## Reproduce it

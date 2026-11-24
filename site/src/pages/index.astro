@@ -116,7 +116,8 @@ const description =
             <p class="scope">
               p50 of 10 queries, one client, on 500,000 synthetic 128-dimension passages, HNSW at pgvector defaults,
               k = 20, <code>hnsw.iterative_scan = relaxed_order</code>, one 4-CPU machine with everything cached.
-              Readers below about 1% take the exact path instead, 1.6 ms at full recall. <a
+              Readers below about 1% take the exact path instead, 1.6 ms at full recall. At 768 dimensions with
+              skewed containers the same readers took 3 to 29 ms (p99 5 to 61 ms). <a
               href="/docs/performance/">The study, its method and its limits</a>
             </p>
           </article>

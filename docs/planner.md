@@ -3,6 +3,19 @@
 The design's largest risk was that an inlined fence next to an HNSW scan would pick a bad plan for readers of middling
 breadth. This page measures it. Reproduce it with `examples/hybrid-pgvector/` (`setup.sql`, then `bench.py`).
 
+## Limits of this study
+
+These limits apply to the 128-dimension study, the first results below. A second run, after them, removes some of
+them. Read the numbers with these limits. They are why the cover page states its scope beside them.
+
+- **Synthetic data.** Clustered random embeddings, not a model's. Every container holds exactly 100 passages.
+- **128 dimensions.** Production embeddings are usually 768 to 1,536, so distance computations and the index are
+  larger.
+- **A warm cache.** Everything was in memory, with nothing else running.
+- **Ten queries per cell**, so "p50" is the median of ten. There is no p95 or p99.
+- **One client.** There were no concurrent readers or writers.
+- **One machine**: 4 CPUs, Docker, Postgres 17 and pgvector 0.8.6.
+
 ## Set-up
 
 - Postgres 17, pgvector 0.8.6, 4 CPUs, 6 GB, `shared_buffers = 1GB`, JIT off. Everything was cached in memory.
@@ -101,6 +114,70 @@ Modes:
    gave the best of both paths at every breadth in this data. A larger `ef_search` raised the broad readers' recall
    (0.84 to 0.97 at 100%) and changed little for narrow ones, whose recall is bounded by the scan limit.
 
+## A second run: 768 dimensions, skewed containers, p99 and concurrency
+
+`examples/hybrid-pgvector-realistic/` addresses some of the limits above. It is still synthetic.
+
+- **Data.** 499,868 passages at 768 dimensions in 20,000 containers, sized about 1/(rank + 30): the largest holds
+  2,486 passages, the median 8. Each container takes 60% of its passages from a home topic (500 topics, noise 0.6).
+  `rebac.readable` holds 2.17 million rows: six named readers and 2,000 skewed background readers.
+- **Server.** Postgres 17.11 and pgvector 0.8.6 in Docker on a 10-CPU laptop (a 15.7 GB VM),
+  `shared_buffers = 2GB`, `fsync = off`. HNSW at the defaults, k = 20, a warm cache.
+- **Measurement.** Latency is 300 pgbench queries per cell (the first 20 dropped). Rows/k and recall are over 200
+  queries against the exact top 20 over the reader's own passages.
+
+```
+reader  breadth ctrs  passages | mode                 p50ms  p95ms  p99ms rows/k recall
+b0001    0.1%    45      501 | ann, iterative off     4.8    9.5   25.0  0.00  0.00
+b0001    0.1%    45      501 | ann, relaxed_order   116.1  207.6  264.0  0.88  0.17
+b0001    0.1%    45      501 | exact (array)          6.7   16.1   20.2  1.00  1.00
+b001     1.1%   202     5291 | ann, iterative off     4.3    9.5   11.6  0.02  0.02
+b001     1.1%   202     5291 | ann, relaxed_order    48.1   67.9   78.5  1.00  0.27
+b001     1.1%   202     5291 | exact (array)         43.7   67.7  108.0  1.00  1.00
+b005     5.1%  1004    25596 | ann, iterative off     5.6   11.5   14.8  0.11  0.06
+b005     5.1%  1004    25596 | ann, relaxed_order    29.0   43.0   60.5  1.00  0.23
+b005     5.1%  1004    25596 | exact (array)        187.7  247.6  270.0  1.00  1.00
+b010    10.0%  2116    49994 | ann, iterative off     5.9   10.0   13.9  0.21  0.06
+b010    10.0%  2116    49994 | ann, relaxed_order    18.0   26.7   30.4  1.00  0.18
+b010    10.0%  2116    49994 | exact (array)        276.3  359.6  417.6  1.00  1.00
+b020    20.0%  4421    99988 | ann, iterative off     3.0    4.2    7.9  0.40  0.06
+b020    20.0%  4421    99988 | ann, relaxed_order     6.5    8.6   12.7  1.00  0.13
+b020    20.0%  4421    99988 | exact (array)        507.8  593.6  667.7  1.00  1.00
+b050    50.0% 10206   249936 | ann, iterative off     2.4    3.0    3.3  0.94  0.08
+b050    50.0% 10206   249936 | ann, relaxed_order     2.8    4.6    5.3  1.00  0.09
+b050    50.0% 10206   249936 | exact (array)       1222.5 1346.5 1401.7  1.00  1.00
+unfenced HNSW baseline: p50 3.7, p95 6.1, p99 7.3 ms (recall 0.09 at ef_search 40)
+
+concurrent fenced reads, 45 s per level, each query for a random reader
+mix (readers)                          clients |  qps  p50ms  p95ms  p99ms
+ANN only (1% breadth and up)                 1 |   59   10.0   42.5   57.1
+                                             8 |  449   11.0   44.1   49.7
+                                            32 |  419   46.3  229.3  326.8
+routed (under 1% of passages: exact)         1 |   88    5.8   38.4   47.6
+                                             8 |  407   11.4   58.0  106.1
+                                            32 |  419   37.7  270.1  483.7
+```
+
+What it shows:
+
+1. **The fence still keeps k.** With `relaxed_order`, every reader from 1% breadth up got all k rows, and the plan
+   was the same. Without it, readers of 0.1% to 10% got 0% to 21% of k, silently.
+2. **At 768 dimensions the middle is slower.** Fenced ANN p50 was 29 ms at 5%, 18 ms at 10%, 6.5 ms at 20% and
+   2.8 ms at 50% (p99 5 to 61 ms), against 4 to 7 ms at 128 dimensions. The "4 to 7 ms" figure belongs to the
+   128-dimension run only.
+3. **The exact path degrades faster.** At about 1% breadth, exact and ANN cost the same (44 and 48 ms), as before.
+   Above it the exact path grows quickly (188 ms at 5%, 1.2 s at 50%), so routing by breadth matters more.
+4. **The recall here says little.** Unfenced HNSW scored 0.09 on this data at `ef_search = 40`: isotropic noise in
+   768 dimensions makes neighbours nearly tied. Fenced recall tracked unfenced recall at the same `ef_search`
+   (0.10 against 0.09 at 50% breadth), which is the property the fence must keep. These recall figures are not a
+   measure of ANN quality on real embeddings.
+5. **Concurrency.** Throughput levelled at about 420 to 450 queries a second from 8 clients on 10 CPUs. At 32
+   clients the machine was CPU-bound and p99 rose to 330 to 480 ms.
+
+Limits that remain: synthetic embeddings, a warm cache, one node and one tenant, `fsync = off`, and no writes,
+refreshes or narrowing during the run. The 128- and 768-dimension runs changed several things at once (dimensions,
+container skew, topic affinity), so they are not a controlled comparison.
+
 ## Recommendations
 
 - Fence an ANN leg with `container in (select * from rebac.readable_set(p))` and `set local hnsw.iterative_scan =
@@ -109,4 +186,4 @@ Modes:
   `container = any(array(select * from rebac.readable_set(p)))`, using `rebac.breadth(p)`.
 - Use custom plans (`plan_cache_mode = force_custom_plan`) for fenced reads, so each plan sees its own reader.
 - Not settled here, and still to measure: a planner support function (C mode) that supplies the per-principal
-  selectivity, so the planner can choose the path itself; Postgres 18; and tenants with skewed passages per container.
+  selectivity, so the planner can choose the path itself; and Postgres 18. (Skewed containers are covered by the 768-dimension run above.)
