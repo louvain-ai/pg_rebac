@@ -1,47 +1,47 @@
--- pg_fence: permission-aware SQL for Postgres, pure-SQL mode.
+-- pg_rebac: permission-aware SQL for Postgres, pure-SQL mode.
 --
--- Install with `psql -v ON_ERROR_STOP=1 -f sql/fence.sql`. Needs nothing beyond plain SQL and PL/pgSQL, so it runs on
--- any Postgres 14 or later, hosted or not. Everything lives in schema `fence`.
+-- Install with `psql -v ON_ERROR_STOP=1 -f sql/rebac.sql`. Needs nothing beyond plain SQL and PL/pgSQL, so it runs on
+-- any Postgres 14 or later, hosted or not. Everything lives in schema `rebac`.
 --
--- The model, in one paragraph. SpiceDB is the authority for who may view what. `fence.readable` is a local,
--- per-tenant, per-principal projection of one permission (by default `container#view`), kept by the `fenced` daemon.
--- A query fences itself with `container in (select * from fence.readable_set(:principal))`, which Postgres inlines
+-- The model, in one paragraph. SpiceDB is the authority for who may view what. `rebac.readable` is a local,
+-- per-tenant, per-principal projection of one permission (by default `container#view`), kept by the `rebacd` daemon.
+-- A query fences itself with `container in (select * from rebac.readable_set(:principal))`, which Postgres inlines
 -- into an indexed semi-join, so the fence sits inside the same plan as a vector or keyword ordering. Relationship
--- writes made through `fence.write` are queued in `fence.outbox` and relayed to SpiceDB in order; a revocation among
+-- writes made through `rebac.write` are queued in `rebac.outbox` and relayed to SpiceDB in order; a revocation among
 -- them is removed from the projection by a deferred trigger before the writing transaction commits.
 --
 -- Errors (SQLSTATE, condition):
---   FN400 fence_no_tenant       no `fence.tenant` setting: a read without a tenant is a bug, not an empty set
---   FN404 fence_not_projected   this principal was never asked; ask the daemon (POST /lookup) and retry
---   FN503 fence_unavailable     the projection cannot be trusted now (stale, over its cap, or the store unreachable)
---   FN422 fence_invalid         a write the fence refuses (a tenant mismatch, a malformed reference)
+--   RB400 rebac_no_tenant       no `rebac.tenant` setting: a read without a tenant is a bug, not an empty set
+--   RB404 rebac_not_projected   this principal was never asked; ask the daemon (POST /lookup) and retry
+--   RB503 rebac_unavailable     the projection cannot be trusted now (stale, over its cap, or the store unreachable)
+--   RB422 rebac_invalid         a write the fence refuses (a tenant mismatch, a malformed reference)
 -- "Never asked", "nothing" and "unavailable" are three different answers, and none of them is an empty set by accident.
 
-create schema if not exists fence;
+create schema if not exists rebac;
 
 -- -------------------------------------------------------------------------------------------------------------------
 -- Configuration. One row per key; the daemon reads the same table, so SQL and daemon cannot disagree.
 -- -------------------------------------------------------------------------------------------------------------------
-create table if not exists fence.config (
+create table if not exists rebac.config (
   key   text primary key,
   value text not null
 );
 
-insert into fence.config (key, value) values
+insert into rebac.config (key, value) values
   ('resource_type', 'container'),     -- the SpiceDB resource type whose permission is projected
   ('permission', 'view'),             -- the projected permission
   ('subject_type', 'user'),           -- the SpiceDB subject type principals read as
   ('tenant_separator', '/'),          -- object ids are '<tenant><sep><id>'; '' when ids carry no tenant prefix
   ('implicit_subject', 'true'),       -- a principal also reads as '<subject_type>:<tenant><sep><principal>'
-  ('max_staleness_ms', '5000'),       -- reads fail closed (FN503) when the daemon's heartbeat is older; 0 turns it off
+  ('max_staleness_ms', '5000'),       -- reads fail closed (RB503) when the daemon's heartbeat is older; 0 turns it off
   ('empty_ttl_ms', '60000'),          -- how long "can read nothing" is believed
   ('max_containers_per_principal', '100000'),
   ('narrow_lock_timeout_ms', '5000')  -- how long narrowing waits for a principal's lock before failing the commit
 on conflict (key) do nothing;
 
-create or replace function fence.setting(k text) returns text
+create or replace function rebac.setting(k text) returns text
 language sql stable parallel safe as $$
-  select value from fence.config where key = k
+  select value from rebac.config where key = k
 $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
@@ -49,20 +49,20 @@ $$;
 -- -------------------------------------------------------------------------------------------------------------------
 
 -- The projection: one row per (tenant, principal, container) the principal may view.
-create table if not exists fence.readable (
+create table if not exists rebac.readable (
   tenant    text not null,
   principal text not null,
   container text not null,   -- the resource id with the tenant prefix stripped
   primary key (tenant, principal, container)
 );
 -- The reverse direction: narrowing, and "who can read this container".
-create index if not exists readable_container_idx on fence.readable (tenant, container);
+create index if not exists readable_container_idx on rebac.readable (tenant, container);
 
 -- A second projection with the same shape, written only by a daemon in shadow mode and compared, never read.
-create table if not exists fence.readable_shadow (like fence.readable including all);
+create table if not exists rebac.readable_shadow (like rebac.readable including all);
 
 -- "This principal was asked and can read nothing", with when. Only ever narrows, for at most `empty_ttl_ms`.
-create table if not exists fence.readable_empty (
+create table if not exists rebac.readable_empty (
   tenant     text not null,
   principal  text not null,
   checked_at timestamptz not null default now(),
@@ -70,7 +70,7 @@ create table if not exists fence.readable_empty (
 );
 
 -- Per-principal state. `retired` reads nothing whatever SpiceDB holds, and no refresh can grow it back.
-create table if not exists fence.principal_state (
+create table if not exists rebac.principal_state (
   tenant       text not null,
   principal    text not null,
   state        text not null check (state in ('projected', 'pending', 'unavailable', 'retired')),
@@ -84,21 +84,21 @@ create table if not exists fence.principal_state (
 
 -- Principal -> SpiceDB subjects. A principal reads as the union of its subjects (and its implicit one). The
 -- application writes this table; only `trusted` rows count.
-create table if not exists fence.subject (
+create table if not exists rebac.subject (
   tenant    text not null,
   principal text not null,
   subject   text not null,   -- a full SpiceDB subject reference, e.g. 'user:acme/slack_U042'
   trusted   boolean not null,
   primary key (tenant, principal, subject)
 );
-create index if not exists subject_by_subject_idx on fence.subject (tenant, subject);
+create index if not exists subject_by_subject_idx on rebac.subject (tenant, subject);
 
 -- The relations that can change the projected permission, derived from the SpiceDB schema by the daemon and checked
 -- against it at start. kind: 'direct' (a relation on the resource type that grants it), 'arrow' (a relation on the
--- resource type the permission walks through; its tuples are mirrored into fence.edge), 'via' (a relation on an
+-- resource type the permission walks through; its tuples are mirrored into rebac.edge), 'via' (a relation on an
 -- arrowed type that grants it there; `through` names the arrow), 'set' (a relation whose tuples are memberships of
 -- a subject set, `group#member`, that a direct relation grants to).
-create table if not exists fence.view_relation (
+create table if not exists rebac.view_relation (
   resource_type text not null,
   relation      text not null,
   kind          text not null check (kind in ('direct', 'arrow', 'via', 'set')),
@@ -108,32 +108,32 @@ create table if not exists fence.view_relation (
 );
 
 -- Local copy of arrow tuples (child#relation@parent), so narrowing works with SpiceDB and the daemon down.
-create table if not exists fence.edge (
+create table if not exists rebac.edge (
   tenant   text not null,
   child    text not null,   -- stripped id of the projected type
   relation text not null,   -- the arrow relation
   parent   text not null,   -- typed and stripped: 'container:space-7', 'workspace:w1'
   primary key (tenant, child, relation, parent)
 );
-create index if not exists edge_parent_idx on fence.edge (tenant, parent, relation);
-alter table fence.view_relation drop constraint if exists view_relation_kind_check;
-alter table fence.view_relation add constraint view_relation_kind_check check (kind in ('direct', 'arrow', 'via', 'set'));
+create index if not exists edge_parent_idx on rebac.edge (tenant, parent, relation);
+alter table rebac.view_relation drop constraint if exists view_relation_kind_check;
+alter table rebac.view_relation add constraint view_relation_kind_check check (kind in ('direct', 'arrow', 'via', 'set'));
 
 -- Local copy of grants to a SUBJECT SET (container#member@group:eng#member), so a membership's removal narrows with
 -- SpiceDB and the daemon down: everyone it named loses what the set was granted.
-create table if not exists fence.set_grant (
+create table if not exists rebac.set_grant (
   tenant      text not null,
   container   text not null,   -- stripped id of the projected type
   relation    text not null,
   subject_set text not null,   -- typed, stripped, with its relation: 'group:eng#member'
   primary key (tenant, container, relation, subject_set)
 );
-create index if not exists set_grant_set_idx on fence.set_grant (tenant, subject_set);
+create index if not exists set_grant_set_idx on rebac.set_grant (tenant, subject_set);
 
 
 
--- The outbox: relationship writes made through fence.write, in the order they must reach SpiceDB.
-create table if not exists fence.outbox (
+-- The outbox: relationship writes made through rebac.write, in the order they must reach SpiceDB.
+create table if not exists rebac.outbox (
   seq           bigserial primary key,
   tenant        text not null,
   op            text not null check (op in ('touch', 'delete')),
@@ -147,12 +147,12 @@ create table if not exists fence.outbox (
   error         text,
   requeued_at   timestamptz
 );
-create index if not exists outbox_unsynced_idx on fence.outbox (tenant, seq) where synced_at is null;
-create index if not exists outbox_relationship_idx on fence.outbox (resource, relation, subject, seq desc);
-create index if not exists outbox_xid_idx on fence.outbox (committed_xid);
+create index if not exists outbox_unsynced_idx on rebac.outbox (tenant, seq) where synced_at is null;
+create index if not exists outbox_relationship_idx on rebac.outbox (resource, relation, subject, seq desc);
+create index if not exists outbox_xid_idx on rebac.outbox (committed_xid);
 
 -- The durable refresh queue: principals whose projection a delivered write (or a sweep) may have changed.
-create table if not exists fence.refresh (
+create table if not exists rebac.refresh (
   tenant      text not null,
   principal   text not null,
   priority    smallint not null default 1,   -- 0 = revocation-driven, 1 = grant, 2 = sweep
@@ -163,18 +163,18 @@ create table if not exists fence.refresh (
   last_error  text,
   primary key (tenant, principal)
 );
-create index if not exists refresh_due_idx on fence.refresh (priority, due_at);
+create index if not exists refresh_due_idx on rebac.refresh (priority, due_at);
 
 -- The daemon's Watch position and liveness. scope '*' is the deployment; a tenant may have its own row.
-create table if not exists fence.watch_state (
+create table if not exists rebac.watch_state (
   scope          text primary key,
   zedtoken       text,
   heartbeat_at   timestamptz,
-  external_writes bigint not null default 0   -- relationship changes seen on Watch that did not come through fence.write
+  external_writes bigint not null default 0   -- relationship changes seen on Watch that did not come through rebac.write
 );
 
 -- Functions the application registers to run inside a narrowing transaction: fn(tenant text, containers text[]).
-create table if not exists fence.narrow_hook (
+create table if not exists rebac.narrow_hook (
   fn regprocedure primary key
 );
 
@@ -183,74 +183,74 @@ create table if not exists fence.narrow_hook (
 -- -------------------------------------------------------------------------------------------------------------------
 
 -- The tenant of this transaction. A missing setting is an error, never an empty set.
-create or replace function fence.tenant() returns text
+create or replace function rebac.tenant() returns text
 language plpgsql stable parallel safe as $$
-declare t text := current_setting('fence.tenant', true);
+declare t text := current_setting('rebac.tenant', true);
 begin
   if t is null or t = '' then
-    raise exception 'fence: no tenant is set for this transaction'
-      using errcode = 'FN400', hint = 'set local fence.tenant = ''<tenant>'' before a fenced read or write';
+    raise exception 'rebac: no tenant is set for this transaction'
+      using errcode = 'RB400', hint = 'set local rebac.tenant = ''<tenant>'' before a fenced read or write';
   end if;
   return t;
 end $$;
 
 -- '<tenant><sep>' or '' when ids carry no tenant prefix.
-create or replace function fence.prefix(t text) returns text
+create or replace function rebac.prefix(t text) returns text
 language sql stable parallel safe as $$
-  select case when coalesce(fence.setting('tenant_separator'), '') = '' then '' else t || fence.setting('tenant_separator') end
+  select case when coalesce(rebac.setting('tenant_separator'), '') = '' then '' else t || rebac.setting('tenant_separator') end
 $$;
 
 -- An object id with its tenant prefix removed, or NULL when it does not carry THIS tenant's prefix.
-create or replace function fence.strip(t text, id text) returns text
+create or replace function rebac.strip(t text, id text) returns text
 language sql stable parallel safe as $$
-  select case when fence.prefix(t) = '' then id
-              when starts_with(id, fence.prefix(t)) then substr(id, length(fence.prefix(t)) + 1)
+  select case when rebac.prefix(t) = '' then id
+              when starts_with(id, rebac.prefix(t)) then substr(id, length(rebac.prefix(t)) + 1)
               else null end
 $$;
 
 -- 'type:id' split.
-create or replace function fence.obj_type(ref text) returns text
+create or replace function rebac.obj_type(ref text) returns text
 language sql immutable parallel safe as $$ select split_part(ref, ':', 1) $$;
-create or replace function fence.obj_id(ref text) returns text
+create or replace function rebac.obj_id(ref text) returns text
 language sql immutable parallel safe as $$ select substr(ref, strpos(ref, ':') + 1) $$;
 
 -- 'group:acme/eng#member' as the set_grant table spells it in tenant t: 'group:eng#member'.
-create or replace function fence.set_ref(t text, ref text) returns text
+create or replace function rebac.set_ref(t text, ref text) returns text
 language sql stable parallel safe as $$
-  select fence.obj_type(ref) || ':' || fence.strip(t, split_part(fence.obj_id(ref), '#', 1))
+  select rebac.obj_type(ref) || ':' || rebac.strip(t, split_part(rebac.obj_id(ref), '#', 1))
          || '#' || split_part(ref, '#', 2)
 $$;
 
 -- The SpiceDB subjects a principal reads as. A retired principal reads as nothing.
-create or replace function fence.subjects_of(t text, p text) returns setof text
+create or replace function rebac.subjects_of(t text, p text) returns setof text
 language sql stable as $$
   select s from (
-    select subject as s from fence.subject where tenant = t and principal = p and trusted
+    select subject as s from rebac.subject where tenant = t and principal = p and trusted
     union
-    select fence.setting('subject_type') || ':' || fence.prefix(t) || p
-    where fence.setting('implicit_subject') = 'true'
+    select rebac.setting('subject_type') || ':' || rebac.prefix(t) || p
+    where rebac.setting('implicit_subject') = 'true'
   ) x
-  where not exists (select 1 from fence.principal_state ps
+  where not exists (select 1 from rebac.principal_state ps
                     where ps.tenant = t and ps.principal = p and ps.state = 'retired')
 $$;
 
 -- The principals a subject reference stands for in a tenant: its explicit links, and its implicit principal.
 -- A subject whose prefix is not this tenant's stands for nobody here.
-create or replace function fence.principals_of(t text, subj text) returns setof text
+create or replace function rebac.principals_of(t text, subj text) returns setof text
 language sql stable as $$
-  select principal from fence.subject where tenant = t and subject = subj and trusted
+  select principal from rebac.subject where tenant = t and subject = subj and trusted
   union
-  select fence.strip(t, fence.obj_id(subj))
-  where fence.setting('implicit_subject') = 'true'
-    and fence.obj_type(subj) = fence.setting('subject_type')
-    and fence.strip(t, fence.obj_id(subj)) is not null
+  select rebac.strip(t, rebac.obj_id(subj))
+  where rebac.setting('implicit_subject') = 'true'
+    and rebac.obj_type(subj) = rebac.setting('subject_type')
+    and rebac.strip(t, rebac.obj_id(subj)) is not null
     and strpos(subj, '#') = 0
 $$;
 
 -- One writer per (tenant, principal): a refresh, a lazy first read and a narrowing all take it before asking SpiceDB.
-create or replace function fence.lock_principal(t text, p text) returns void
+create or replace function rebac.lock_principal(t text, p text) returns void
 language sql volatile as $$
-  select pg_advisory_xact_lock(hashtextextended('fence:' || t || ':' || p, 0))
+  select pg_advisory_xact_lock(hashtextextended('rebac:' || t || ':' || p, 0))
 $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
@@ -259,87 +259,87 @@ $$;
 
 -- May THIS principal be read for, now? True to read its rows; false for a principal that reads nothing (retired, or
 -- a fresh "nothing" mark); otherwise it raises. The sets below use it as a pseudo-constant qual, which the planner
--- places in a one-time gating filter, evaluated once and before the scan of fence.readable.
-create or replace function fence.checked(p text) returns boolean
+-- places in a one-time gating filter, evaluated once and before the scan of rebac.readable.
+create or replace function rebac.checked(p text) returns boolean
 language plpgsql stable parallel safe as $$
 declare
-  t text := fence.tenant();
-  bound bigint := coalesce(fence.setting('max_staleness_ms'), '0')::bigint;
+  t text := rebac.tenant();
+  bound bigint := coalesce(rebac.setting('max_staleness_ms'), '0')::bigint;
   beat timestamptz;
-  st fence.principal_state;
+  st rebac.principal_state;
 begin
   if p is null or p = '' then
-    raise exception 'fence: no principal' using errcode = 'FN400';
+    raise exception 'rebac: no principal' using errcode = 'RB400';
   end if;
   if bound > 0 then
-    select max(heartbeat_at) into beat from fence.watch_state where scope in ('*', t);
+    select max(heartbeat_at) into beat from rebac.watch_state where scope in ('*', t);
     if beat is null or statement_timestamp() - beat > bound * interval '1 millisecond' then
-      raise exception 'fence: the projection is stale (no daemon heartbeat within % ms)', bound
-        using errcode = 'FN503', hint = 'fence_stale: check that fenced is running and can reach SpiceDB';
+      raise exception 'rebac: the projection is stale (no daemon heartbeat within % ms)', bound
+        using errcode = 'RB503', hint = 'rebac_stale: check that rebacd is running and can reach SpiceDB';
     end if;
   end if;
-  select * into st from fence.principal_state where tenant = t and principal = p;
+  select * into st from rebac.principal_state where tenant = t and principal = p;
   if found then
     if st.state = 'retired' then return false; end if;
     if st.state = 'unavailable' then
-      raise exception 'fence: the projection of this principal is unavailable (%)', coalesce(st.reason, 'unknown')
-        using errcode = 'FN503';
+      raise exception 'rebac: the projection of this principal is unavailable (%)', coalesce(st.reason, 'unknown')
+        using errcode = 'RB503';
     end if;
     if st.state = 'projected' then
       if st.n_containers > 0 then return true; end if;
-      if exists (select 1 from fence.readable_empty e where e.tenant = t and e.principal = p
+      if exists (select 1 from rebac.readable_empty e where e.tenant = t and e.principal = p
                    and e.checked_at > statement_timestamp()
-                       - coalesce(fence.setting('empty_ttl_ms'), '0')::bigint * interval '1 millisecond') then
+                       - coalesce(rebac.setting('empty_ttl_ms'), '0')::bigint * interval '1 millisecond') then
         return false;
       end if;
     end if;
   end if;
-  raise exception 'fence: this principal has not been projected'
-    using errcode = 'FN404', hint = 'ask the daemon (POST /lookup) to project it, then retry';
+  raise exception 'rebac: this principal has not been projected'
+    using errcode = 'RB404', hint = 'ask the daemon (POST /lookup) to project it, then retry';
 end $$;
 
 -- THE SET. Inlined by the planner when used in FROM, so
---     where p.container in (select * from fence.readable_set(:principal))
--- is a semi-join on fence.readable's primary key. The principal is compared as the caller's own value, so the
+--     where p.container in (select * from rebac.readable_set(:principal))
+-- is a semi-join on rebac.readable's primary key. The principal is compared as the caller's own value, so the
 -- planner estimates its breadth from ordinary statistics; the checks run once, in a gating filter. A scalar function
 -- with a sub-select is never inlined, which is why the planner-shaped form is a set and not a boolean.
--- GUARANTEE: no row is ever returned without fence.checked having passed. An answer that is empty for another reason
+-- GUARANTEE: no row is ever returned without rebac.checked having passed. An answer that is empty for another reason
 -- (nothing to fence) may return empty without evaluating it.
-create or replace function fence.readable_set(p text) returns setof text
+create or replace function rebac.readable_set(p text) returns setof text
 language sql stable parallel safe rows 1000 as $$
-  select r.container from fence.readable r
-  where (select fence.checked(p)) and r.tenant = (select fence.tenant()) and r.principal = p
+  select r.container from rebac.readable r
+  where (select rebac.checked(p)) and r.tenant = (select rebac.tenant()) and r.principal = p
 $$;
 
 -- The set, narrowed by a list the caller resolved: an intersection, so the list can only narrow, never widen.
-create or replace function fence.readable_set(p text, within text[]) returns setof text
+create or replace function rebac.readable_set(p text, within text[]) returns setof text
 language sql stable parallel safe rows 1000 as $$
-  select r.container from fence.readable r
-  where (select fence.checked(p)) and r.tenant = (select fence.tenant()) and r.principal = p
+  select r.container from rebac.readable r
+  where (select rebac.checked(p)) and r.tenant = (select rebac.tenant()) and r.principal = p
     and r.container = any(within)
 $$;
 
 -- One check, one container: the principal is checked first, always. Evaluated row by row, so use readable_set to
 -- filter a scan.
-create or replace function fence.readable_by(p text, c text) returns boolean
+create or replace function rebac.readable_by(p text, c text) returns boolean
 language plpgsql stable parallel safe as $$
 begin
-  if not fence.checked(p) then return false; end if;
-  return exists (select 1 from fence.readable r where r.tenant = fence.tenant() and r.principal = p and r.container = c);
+  if not rebac.checked(p) then return false; end if;
+  return exists (select 1 from rebac.readable r where r.tenant = rebac.tenant() and r.principal = p and r.container = c);
 end $$;
 
 -- How many containers a principal reads (checked like a read), for choosing the exact path or the ANN path: below
 -- a few thousand candidate rows the exact path is both faster and complete (docs/planner.md).
-create or replace function fence.breadth(p text) returns integer
+create or replace function rebac.breadth(p text) returns integer
 language sql stable as $$
-  select case when fence.checked(p) then
-    (select n_containers from fence.principal_state where tenant = fence.tenant() and principal = p) else 0 end
+  select case when rebac.checked(p) then
+    (select n_containers from rebac.principal_state where tenant = rebac.tenant() and principal = p) else 0 end
 $$;
 
 -- The set's version, for caches keyed on it.
-create or replace function fence.version(p text) returns bigint
+create or replace function rebac.version(p text) returns bigint
 language sql stable as $$
-  select coalesce((select version from fence.principal_state where tenant = fence.tenant() and principal = p), 0)
+  select coalesce((select version from rebac.principal_state where tenant = rebac.tenant() and principal = p), 0)
 $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
@@ -349,190 +349,190 @@ $$;
 -- The containers a pending (undelivered) revocation names for this principal, which no projection may include:
 -- SpiceDB still holds the grant until the relay delivers the delete. Read BEFORE SpiceDB is asked; a delete delivered
 -- after this read is also absent from the lookup that follows.
-create or replace function fence.pending_revoked(t text, p text) returns setof text
+create or replace function rebac.pending_revoked(t text, p text) returns setof text
 language sql stable as $$
   with recursive
-  subj as (select fence.subjects_of(t, p) as s),
+  subj as (select rebac.subjects_of(t, p) as s),
   net as (  -- latest undelivered op per relationship in this tenant
     select distinct on (resource, relation, subject) op, resource, relation, subject
-    from fence.outbox where tenant = t and synced_at is null
+    from rebac.outbox where tenant = t and synced_at is null
     order by resource, relation, subject, seq desc
   ),
   deleted as (select * from net where op = 'delete'),
   seed as (
     -- a direct view relation of this principal's subjects
-    select fence.strip(t, fence.obj_id(d.resource)) as c
-    from deleted d join fence.view_relation v
-      on v.kind = 'direct' and v.relation = d.relation and v.resource_type = fence.obj_type(d.resource)
-    where d.subject in (select s from subj) and v.resource_type = fence.setting('resource_type')
+    select rebac.strip(t, rebac.obj_id(d.resource)) as c
+    from deleted d join rebac.view_relation v
+      on v.kind = 'direct' and v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
+    where d.subject in (select s from subj) and v.resource_type = rebac.setting('resource_type')
     union
     -- a via relation (e.g. workspace#admin): every container whose edge reaches it
     select e.child
-    from deleted d join fence.view_relation v
-      on v.kind = 'via' and v.relation = d.relation and v.resource_type = fence.obj_type(d.resource)
-    join fence.edge e on e.tenant = t and e.relation = v.through
-      and e.parent = fence.obj_type(d.resource) || ':' || fence.strip(t, fence.obj_id(d.resource))
+    from deleted d join rebac.view_relation v
+      on v.kind = 'via' and v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
+    join rebac.edge e on e.tenant = t and e.relation = v.through
+      and e.parent = rebac.obj_type(d.resource) || ':' || rebac.strip(t, rebac.obj_id(d.resource))
     where d.subject in (select s from subj)
     union
     -- an arrow tuple, or a grant to a subject set, being removed holds its container for everyone until delivered
-    select fence.strip(t, fence.obj_id(d.resource))
-    from deleted d join fence.view_relation v
-      on v.relation = d.relation and v.resource_type = fence.obj_type(d.resource)
+    select rebac.strip(t, rebac.obj_id(d.resource))
+    from deleted d join rebac.view_relation v
+      on v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
      and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
     union
     -- a membership of a subject set: whatever the set was granted
     select g.container
-    from deleted d join fence.view_relation v
-      on v.kind = 'set' and v.relation = d.relation and v.resource_type = fence.obj_type(d.resource)
-    join fence.set_grant g on g.tenant = t
-      and g.subject_set = fence.obj_type(d.resource) || ':' || fence.strip(t, fence.obj_id(d.resource)) || '#' || d.relation
+    from deleted d join rebac.view_relation v
+      on v.kind = 'set' and v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
+    join rebac.set_grant g on g.tenant = t
+      and g.subject_set = rebac.obj_type(d.resource) || ':' || rebac.strip(t, rebac.obj_id(d.resource)) || '#' || d.relation
     where d.subject in (select s from subj)
   ),
   closure as (  -- and everything under those through self-arrows (a space's shared files)
     select c from seed where c is not null
     union
     select e.child from closure k
-    join fence.edge e on e.tenant = t and e.parent = fence.setting('resource_type') || ':' || k.c
-    join fence.view_relation v on v.kind = 'arrow' and v.relation = e.relation
-      and v.target_type = fence.setting('resource_type')
+    join rebac.edge e on e.tenant = t and e.parent = rebac.setting('resource_type') || ':' || k.c
+    join rebac.view_relation v on v.kind = 'arrow' and v.relation = e.relation
+      and v.target_type = rebac.setting('resource_type')
   )
   select c from closure
 $$;
 
 -- Replace a principal's projection with `containers`, minus pending revocations, at `token`. The caller holds the
--- principal's lock (fence.lock_principal) from BEFORE its SpiceDB lookup. `target` is 'live' or 'shadow'.
-create or replace function fence.project(t text, p text, containers text[], token text, target text default 'live')
+-- principal's lock (rebac.lock_principal) from BEFORE its SpiceDB lookup. `target` is 'live' or 'shadow'.
+create or replace function rebac.project(t text, p text, containers text[], token text, target text default 'live')
 returns integer
 language plpgsql volatile as $$
 declare
-  cap integer := coalesce(fence.setting('max_containers_per_principal'), '100000')::integer;
+  cap integer := coalesce(rebac.setting('max_containers_per_principal'), '100000')::integer;
   final text[];
   n integer;
 begin
   if target not in ('live', 'shadow') then
-    raise exception 'fence.project: target must be live or shadow' using errcode = 'FN422';
+    raise exception 'rebac.project: target must be live or shadow' using errcode = 'RB422';
   end if;
   if target = 'shadow' then
-    delete from fence.readable_shadow where tenant = t and principal = p;
-    if exists (select 1 from fence.principal_state where tenant = t and principal = p and state = 'retired') then
+    delete from rebac.readable_shadow where tenant = t and principal = p;
+    if exists (select 1 from rebac.principal_state where tenant = t and principal = p and state = 'retired') then
       return 0;
     end if;
-    insert into fence.readable_shadow (tenant, principal, container)
+    insert into rebac.readable_shadow (tenant, principal, container)
     select t, p, c from unnest(containers) c
-    where c is not null and c not in (select fence.pending_revoked(t, p))
+    where c is not null and c not in (select rebac.pending_revoked(t, p))
     on conflict do nothing;
     get diagnostics n = row_count;
     return n;
   end if;
 
-  if exists (select 1 from fence.principal_state where tenant = t and principal = p and state = 'retired') then
-    delete from fence.readable where tenant = t and principal = p;
+  if exists (select 1 from rebac.principal_state where tenant = t and principal = p and state = 'retired') then
+    delete from rebac.readable where tenant = t and principal = p;
     return 0;
   end if;
   select coalesce(array_agg(distinct c), '{}') into final
   from unnest(containers) c
-  where c is not null and c not in (select fence.pending_revoked(t, p));
+  where c is not null and c not in (select rebac.pending_revoked(t, p));
   n := cardinality(final);
-  delete from fence.readable where tenant = t and principal = p;
+  delete from rebac.readable where tenant = t and principal = p;
   if n > cap then
     -- Never truncated: a truncated set is a wrong fence. Unavailable until someone raises the cap.
-    insert into fence.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version)
+    insert into rebac.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version)
     values (t, p, 'unavailable', 'over_cap', token, now(), 0, 1)
     on conflict (tenant, principal) do update
       set state = 'unavailable', reason = 'over_cap', zedtoken = excluded.zedtoken, projected_at = now(),
-          n_containers = 0, version = fence.principal_state.version + 1;
+          n_containers = 0, version = rebac.principal_state.version + 1;
     return 0;
   end if;
   if n > 0 then
-    insert into fence.readable (tenant, principal, container) select t, p, c from unnest(final) c;
-    delete from fence.readable_empty where tenant = t and principal = p;
+    insert into rebac.readable (tenant, principal, container) select t, p, c from unnest(final) c;
+    delete from rebac.readable_empty where tenant = t and principal = p;
   else
-    insert into fence.readable_empty (tenant, principal, checked_at) values (t, p, now())
+    insert into rebac.readable_empty (tenant, principal, checked_at) values (t, p, now())
     on conflict (tenant, principal) do update set checked_at = now();
   end if;
-  insert into fence.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version)
+  insert into rebac.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version)
   values (t, p, 'projected', null, token, now(), n, 1)
   on conflict (tenant, principal) do update
     set state = 'projected', reason = null, zedtoken = excluded.zedtoken, projected_at = now(),
-        n_containers = excluded.n_containers, version = fence.principal_state.version + 1;
+        n_containers = excluded.n_containers, version = rebac.principal_state.version + 1;
   return n;
 end $$;
 
 -- Mark a principal as unreadable for now (the store could not be asked on a first read). Never an empty set.
-create or replace function fence.mark_unavailable(t text, p text, why text) returns void
+create or replace function rebac.mark_unavailable(t text, p text, why text) returns void
 language sql volatile as $$
-  insert into fence.principal_state (tenant, principal, state, reason)
+  insert into rebac.principal_state (tenant, principal, state, reason)
   values (t, p, 'unavailable', why)
   on conflict (tenant, principal) do update set state = 'unavailable', reason = excluded.reason
-  where fence.principal_state.state <> 'retired'
+  where rebac.principal_state.state <> 'retired'
 $$;
 
--- Retire a principal: it reads nothing from now on, whatever SpiceDB holds, until fence.unretire.
-create or replace function fence.retire(t text, p text) returns void
+-- Retire a principal: it reads nothing from now on, whatever SpiceDB holds, until rebac.unretire.
+create or replace function rebac.retire(t text, p text) returns void
 language plpgsql volatile as $$
 begin
-  perform fence.lock_principal(t, p);
-  delete from fence.readable where tenant = t and principal = p;
-  delete from fence.readable_empty where tenant = t and principal = p;
-  insert into fence.principal_state (tenant, principal, state, reason, version)
+  perform rebac.lock_principal(t, p);
+  delete from rebac.readable where tenant = t and principal = p;
+  delete from rebac.readable_empty where tenant = t and principal = p;
+  insert into rebac.principal_state (tenant, principal, state, reason, version)
   values (t, p, 'retired', null, 1)
   on conflict (tenant, principal) do update
-    set state = 'retired', reason = null, n_containers = 0, version = fence.principal_state.version + 1;
+    set state = 'retired', reason = null, n_containers = 0, version = rebac.principal_state.version + 1;
 end $$;
 
-create or replace function fence.unretire(t text, p text) returns void
+create or replace function rebac.unretire(t text, p text) returns void
 language sql volatile as $$
-  update fence.principal_state set state = 'pending', version = version + 1
+  update rebac.principal_state set state = 'pending', version = version + 1
   where tenant = t and principal = p and state = 'retired';
-  insert into fence.refresh (tenant, principal, priority) values (t, p, 0)
-  on conflict (tenant, principal) do update set priority = least(fence.refresh.priority, 0), due_at = now()
+  insert into rebac.refresh (tenant, principal, priority) values (t, p, 0)
+  on conflict (tenant, principal) do update set priority = least(rebac.refresh.priority, 0), due_at = now()
 $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
--- The write side: fence.write and revocation-first narrowing.
+-- The write side: rebac.write and revocation-first narrowing.
 -- -------------------------------------------------------------------------------------------------------------------
 
--- Queue one relationship write in the caller's transaction. Arrow tuples are mirrored into fence.edge at once, so
+-- Queue one relationship write in the caller's transaction. Arrow tuples are mirrored into rebac.edge at once, so
 -- narrowing never needs SpiceDB. A reference whose id does not carry this tenant's prefix is refused.
-create or replace function fence.write(op text, resource text, relation text, subject text) returns bigint
+create or replace function rebac.write(op text, resource text, relation text, subject text) returns bigint
 language plpgsql volatile as $$
 declare
-  t text := fence.tenant();
+  t text := rebac.tenant();
   new_seq bigint;
-  v fence.view_relation;
+  v rebac.view_relation;
   child text;
   parent text;
 begin
   if op not in ('touch', 'delete') then
-    raise exception 'fence.write: op must be touch or delete' using errcode = 'FN422';
+    raise exception 'rebac.write: op must be touch or delete' using errcode = 'RB422';
   end if;
   if strpos(resource, ':') = 0 or strpos(subject, ':') = 0 or relation = '' or strpos(resource, '#') > 0 then
-    raise exception 'fence.write: references are type:id (a subject may add #relation, a resource may not)'
-      using errcode = 'FN422';
+    raise exception 'rebac.write: references are type:id (a subject may add #relation, a resource may not)'
+      using errcode = 'RB422';
   end if;
-  if fence.strip(t, fence.obj_id(resource)) is null
-     or fence.strip(t, split_part(fence.obj_id(subject), '#', 1)) is null then
-    raise exception 'fence.write: a reference does not carry this tenant''s prefix' using errcode = 'FN422';
+  if rebac.strip(t, rebac.obj_id(resource)) is null
+     or rebac.strip(t, split_part(rebac.obj_id(subject), '#', 1)) is null then
+    raise exception 'rebac.write: a reference does not carry this tenant''s prefix' using errcode = 'RB422';
   end if;
-  insert into fence.outbox (tenant, op, resource, relation, subject)
+  insert into rebac.outbox (tenant, op, resource, relation, subject)
   values (t, op, resource, relation, subject) returning outbox.seq into new_seq;
 
-  select * into v from fence.view_relation vr
-  where vr.resource_type = fence.obj_type(resource) and vr.relation = write.relation and vr.kind = 'arrow';
-  if found and fence.obj_type(resource) = fence.setting('resource_type') then
-    child := fence.strip(t, fence.obj_id(resource));
-    parent := fence.obj_type(subject) || ':' || fence.strip(t, fence.obj_id(subject));
+  select * into v from rebac.view_relation vr
+  where vr.resource_type = rebac.obj_type(resource) and vr.relation = write.relation and vr.kind = 'arrow';
+  if found and rebac.obj_type(resource) = rebac.setting('resource_type') then
+    child := rebac.strip(t, rebac.obj_id(resource));
+    parent := rebac.obj_type(subject) || ':' || rebac.strip(t, rebac.obj_id(subject));
     if op = 'touch' then
-      insert into fence.edge (tenant, child, relation, parent) values (t, child, write.relation, parent)
+      insert into rebac.edge (tenant, child, relation, parent) values (t, child, write.relation, parent)
       on conflict do nothing;
     end if;
     -- A delete keeps the edge until commit-time narrowing has used it; narrow_pending removes it.
   end if;
-  if op = 'touch' and strpos(subject, '#') > 0 and fence.obj_type(resource) = fence.setting('resource_type')
-     and exists (select 1 from fence.view_relation vr where vr.resource_type = fence.obj_type(resource)
+  if op = 'touch' and strpos(subject, '#') > 0 and rebac.obj_type(resource) = rebac.setting('resource_type')
+     and exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
                    and vr.relation = write.relation and vr.kind = 'direct') then
-    insert into fence.set_grant (tenant, container, relation, subject_set)
-    values (t, fence.strip(t, fence.obj_id(resource)), write.relation, fence.set_ref(t, subject))
+    insert into rebac.set_grant (tenant, container, relation, subject_set)
+    values (t, rebac.strip(t, rebac.obj_id(resource)), write.relation, rebac.set_ref(t, subject))
     on conflict do nothing;
   end if;
   return new_seq;
@@ -542,23 +542,23 @@ end $$;
 -- principals' locks taken in sorted order. Returns the number of projection rows removed. The commit trigger calls it
 -- with this transaction's rows; the relay calls it again with the rows it claims, which is a no-op when the writing
 -- transaction already narrowed, and the safety net when it did not.
-create or replace function fence.narrow_seqs(seqs bigint[]) returns integer
+create or replace function rebac.narrow_seqs(seqs bigint[]) returns integer
 language plpgsql volatile as $$
 declare
   removed integer := 0;
   rec_p record;
   rec_h record;
-  root text := fence.setting('resource_type');
+  root text := rebac.setting('resource_type');
   prior text := current_setting('lock_timeout');
 begin
   if seqs is null or cardinality(seqs) = 0 then return 0; end if;
-  create temp table if not exists fence_narrow_pairs (tenant text, principal text, container text)
+  create temp table if not exists rebac_narrow_pairs (tenant text, principal text, container text)
     on commit drop;
-  truncate fence_narrow_pairs;
+  truncate rebac_narrow_pairs;
 
   with net as (
     select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
-    from fence.outbox where seq = any(seqs)
+    from rebac.outbox where seq = any(seqs)
     order by resource, relation, subject, seq desc
   ),
   del as (select * from net where op = 'delete'),
@@ -566,13 +566,13 @@ begin
   -- from editor to member is not a revocation)
   direct as (
     select d.tenant, d.resource, d.subject
-    from del d join fence.view_relation v
-      on v.kind = 'direct' and v.resource_type = fence.obj_type(d.resource) and v.relation = d.relation
+    from del d join rebac.view_relation v
+      on v.kind = 'direct' and v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
     where v.resource_type = root
       and not exists (
-        select 1 from fence.view_relation o
+        select 1 from rebac.view_relation o
         cross join lateral (
-          select x.op from fence.outbox x
+          select x.op from rebac.outbox x
           where x.resource = d.resource and x.relation = o.relation and x.subject = d.subject
           order by x.seq desc limit 1) latest
         where o.kind = 'direct' and o.resource_type = v.resource_type and o.relation <> d.relation
@@ -580,171 +580,171 @@ begin
   ),
   via as (
     select d.tenant, d.subject, e.child as container
-    from del d join fence.view_relation v
-      on v.kind = 'via' and v.resource_type = fence.obj_type(d.resource) and v.relation = d.relation
-    join fence.edge e on e.tenant = d.tenant and e.relation = v.through
-      and e.parent = fence.obj_type(d.resource) || ':' || fence.strip(d.tenant, fence.obj_id(d.resource))
+    from del d join rebac.view_relation v
+      on v.kind = 'via' and v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
+    join rebac.edge e on e.tenant = d.tenant and e.relation = v.through
+      and e.parent = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource))
   ),
   arrow as (  -- an arrow, or a grant to a subject set, removed: everyone who holds the container loses it
-    select d.tenant, fence.strip(d.tenant, fence.obj_id(d.resource)) as container
-    from del d join fence.view_relation v
-      on v.resource_type = fence.obj_type(d.resource) and v.relation = d.relation
+    select d.tenant, rebac.strip(d.tenant, rebac.obj_id(d.resource)) as container
+    from del d join rebac.view_relation v
+      on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
      and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
     where v.resource_type = root
   ),
   membership as (  -- a member leaves a subject set: they lose what the set was granted
     select d.tenant, d.subject, g.container
-    from del d join fence.view_relation v
-      on v.kind = 'set' and v.resource_type = fence.obj_type(d.resource) and v.relation = d.relation
-    join fence.set_grant g on g.tenant = d.tenant
-      and g.subject_set = fence.obj_type(d.resource) || ':' || fence.strip(d.tenant, fence.obj_id(d.resource)) || '#' || d.relation
+    from del d join rebac.view_relation v
+      on v.kind = 'set' and v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
+    join rebac.set_grant g on g.tenant = d.tenant
+      and g.subject_set = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource)) || '#' || d.relation
   )
-  insert into fence_narrow_pairs (tenant, principal, container)
-  select x.tenant, p, fence.strip(x.tenant, fence.obj_id(x.resource))
-  from direct x cross join lateral fence.principals_of(x.tenant, x.subject) p
+  insert into rebac_narrow_pairs (tenant, principal, container)
+  select x.tenant, p, rebac.strip(x.tenant, rebac.obj_id(x.resource))
+  from direct x cross join lateral rebac.principals_of(x.tenant, x.subject) p
   union
   select x.tenant, p, x.container
-  from via x cross join lateral fence.principals_of(x.tenant, x.subject) p
+  from via x cross join lateral rebac.principals_of(x.tenant, x.subject) p
   union
   select x.tenant, p, x.container
-  from membership x cross join lateral fence.principals_of(x.tenant, x.subject) p
+  from membership x cross join lateral rebac.principals_of(x.tenant, x.subject) p
   union
   select r.tenant, r.principal, r.container
-  from arrow a join fence.readable r on r.tenant = a.tenant and r.container = a.container;
+  from arrow a join rebac.readable r on r.tenant = a.tenant and r.container = a.container;
 
   -- Everything under a lost container through self-arrows goes with it (a space's shared files).
   with recursive closure(tenant, principal, container) as (
-    select tenant, principal, container from fence_narrow_pairs
+    select tenant, principal, container from rebac_narrow_pairs
     union
     select k.tenant, k.principal, e.child
     from closure k
-    join fence.edge e on e.tenant = k.tenant and e.parent = root || ':' || k.container
-    join fence.view_relation v on v.kind = 'arrow' and v.relation = e.relation and v.target_type = root
+    join rebac.edge e on e.tenant = k.tenant and e.parent = root || ':' || k.container
+    join rebac.view_relation v on v.kind = 'arrow' and v.relation = e.relation and v.target_type = root
   )
-  insert into fence_narrow_pairs select * from closure
-  except select * from fence_narrow_pairs;
+  insert into rebac_narrow_pairs select * from closure
+  except select * from rebac_narrow_pairs;
 
   -- Removed arrows leave the edge table now that narrowing has used them.
-  delete from fence.edge e using (
+  delete from rebac.edge e using (
     select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
-    from fence.outbox where seq = any(seqs)
+    from rebac.outbox where seq = any(seqs)
     order by resource, relation, subject, seq desc
   ) n
   where n.op = 'delete' and e.tenant = n.tenant and e.relation = n.relation
-    and e.child = fence.strip(n.tenant, fence.obj_id(n.resource))
-    and e.parent = fence.obj_type(n.subject) || ':' || fence.strip(n.tenant, fence.obj_id(n.subject));
+    and e.child = rebac.strip(n.tenant, rebac.obj_id(n.resource))
+    and e.parent = rebac.obj_type(n.subject) || ':' || rebac.strip(n.tenant, rebac.obj_id(n.subject));
 
   -- Removed grants to a subject set leave the set_grant table likewise.
-  delete from fence.set_grant g using (
+  delete from rebac.set_grant g using (
     select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
-    from fence.outbox where seq = any(seqs)
+    from rebac.outbox where seq = any(seqs)
     order by resource, relation, subject, seq desc
   ) n
   where n.op = 'delete' and strpos(n.subject, '#') > 0 and g.tenant = n.tenant and g.relation = n.relation
-    and g.container = fence.strip(n.tenant, fence.obj_id(n.resource)) and g.subject_set = fence.set_ref(n.tenant, n.subject);
+    and g.container = rebac.strip(n.tenant, rebac.obj_id(n.resource)) and g.subject_set = rebac.set_ref(n.tenant, n.subject);
 
-  if not exists (select 1 from fence_narrow_pairs) then return 0; end if;
+  if not exists (select 1 from rebac_narrow_pairs) then return 0; end if;
 
   -- A lookup that began before this revocation may be in flight under the principal's lock: wait for it, so it
   -- cannot write the grant back afterwards. Sorted, and bounded, so this cannot deadlock against the daemon.
-  perform set_config('lock_timeout', fence.setting('narrow_lock_timeout_ms') || 'ms', true);
-  for rec_p in select distinct tenant, principal from fence_narrow_pairs order by tenant, principal loop
-    perform fence.lock_principal(rec_p.tenant, rec_p.principal);
+  perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
+  for rec_p in select distinct tenant, principal from rebac_narrow_pairs order by tenant, principal loop
+    perform rebac.lock_principal(rec_p.tenant, rec_p.principal);
   end loop;
   perform set_config('lock_timeout', prior, true);
 
-  delete from fence.readable r using fence_narrow_pairs n
+  delete from rebac.readable r using rebac_narrow_pairs n
   where r.tenant = n.tenant and r.principal = n.principal and r.container = n.container;
   get diagnostics removed = row_count;
 
-  update fence.principal_state s set version = s.version + 1,
-    n_containers = (select count(*) from fence.readable r where r.tenant = s.tenant and r.principal = s.principal)
-  from (select distinct tenant, principal from fence_narrow_pairs) n
+  update rebac.principal_state s set version = s.version + 1,
+    n_containers = (select count(*) from rebac.readable r where r.tenant = s.tenant and r.principal = s.principal)
+  from (select distinct tenant, principal from rebac_narrow_pairs) n
   where s.tenant = n.tenant and s.principal = n.principal;
   -- Narrowed to nothing is a known answer, "nothing", not "never asked".
-  insert into fence.readable_empty (tenant, principal, checked_at)
-  select s.tenant, s.principal, now() from fence.principal_state s
-  join (select distinct tenant, principal from fence_narrow_pairs) n
+  insert into rebac.readable_empty (tenant, principal, checked_at)
+  select s.tenant, s.principal, now() from rebac.principal_state s
+  join (select distinct tenant, principal from rebac_narrow_pairs) n
     on s.tenant = n.tenant and s.principal = n.principal
   where s.n_containers = 0 and s.state = 'projected'
   on conflict (tenant, principal) do update set checked_at = now();
 
-  for rec_h in select fn from fence.narrow_hook loop
-    for rec_p in select tenant, array_agg(distinct container) as containers from fence_narrow_pairs group by tenant loop
+  for rec_h in select fn from rebac.narrow_hook loop
+    for rec_p in select tenant, array_agg(distinct container) as containers from rebac_narrow_pairs group by tenant loop
       execute format('select %s($1, $2)', rec_h.fn::regproc) using rec_p.tenant, rec_p.containers;
     end loop;
   end loop;
-  perform pg_notify('fence_narrowed', '');
+  perform pg_notify('rebac_narrowed', '');
   return removed;
 end $$;
 
 -- Narrow every revocation THIS transaction queued, once. Called by the deferred trigger at commit; calling it earlier
 -- is allowed, and the trigger then skips what is done.
-create or replace function fence.narrow_pending() returns integer
+create or replace function rebac.narrow_pending() returns integer
 language plpgsql volatile as $$
 declare
-  upto bigint := coalesce(nullif(current_setting('fence._narrowed_upto', true), ''), '0')::bigint;
+  upto bigint := coalesce(nullif(current_setting('rebac._narrowed_upto', true), ''), '0')::bigint;
   seqs bigint[];
 begin
   select array_agg(seq order by seq) into seqs
-  from fence.outbox where committed_xid = pg_current_xact_id() and seq > upto;
+  from rebac.outbox where committed_xid = pg_current_xact_id() and seq > upto;
   if seqs is null then return 0; end if;
-  perform set_config('fence._narrowed_upto', seqs[cardinality(seqs)]::text, true);
-  return fence.narrow_seqs(seqs);
+  perform set_config('rebac._narrowed_upto', seqs[cardinality(seqs)]::text, true);
+  return rebac.narrow_seqs(seqs);
 end $$;
 
-create or replace function fence.narrow_trigger() returns trigger
+create or replace function rebac.narrow_trigger() returns trigger
 language plpgsql as $$
 begin
-  if new.seq > coalesce(nullif(current_setting('fence._narrowed_upto', true), ''), '0')::bigint then
-    perform fence.narrow_pending();
+  if new.seq > coalesce(nullif(current_setting('rebac._narrowed_upto', true), ''), '0')::bigint then
+    perform rebac.narrow_pending();
   end if;
   return null;
 end $$;
 
 -- The trigger makes the promise structural: a caller cannot forget to narrow.
-drop trigger if exists fence_outbox_narrow on fence.outbox;
-create constraint trigger fence_outbox_narrow
-  after insert on fence.outbox deferrable initially deferred
-  for each row execute function fence.narrow_trigger();
+drop trigger if exists rebac_outbox_narrow on rebac.outbox;
+create constraint trigger rebac_outbox_narrow
+  after insert on rebac.outbox deferrable initially deferred
+  for each row execute function rebac.narrow_trigger();
 
 -- Wake the relay when a transaction commits outbox rows.
-create or replace function fence.notify_outbox() returns trigger
+create or replace function rebac.notify_outbox() returns trigger
 language plpgsql as $$
 begin
-  perform pg_notify('fence_outbox', '');
+  perform pg_notify('rebac_outbox', '');
   return null;
 end $$;
-drop trigger if exists fence_outbox_notify on fence.outbox;
-create trigger fence_outbox_notify after insert on fence.outbox
-  for each statement execute function fence.notify_outbox();
+drop trigger if exists rebac_outbox_notify on rebac.outbox;
+create trigger rebac_outbox_notify after insert on rebac.outbox
+  for each statement execute function rebac.notify_outbox();
 
 -- -------------------------------------------------------------------------------------------------------------------
 -- Status and RLS.
 -- -------------------------------------------------------------------------------------------------------------------
 
-create or replace function fence.status() returns table (
+create or replace function rebac.status() returns table (
   heartbeat_age_ms bigint, stale boolean, pending_outbox bigint, quarantined bigint, refresh_queue bigint,
   external_writes bigint, unavailable_principals bigint)
 language sql stable as $$
   select
-    (extract(epoch from (statement_timestamp() - (select max(heartbeat_at) from fence.watch_state))) * 1000)::bigint,
-    coalesce((select max(heartbeat_at) from fence.watch_state) is null
-      or statement_timestamp() - (select max(heartbeat_at) from fence.watch_state)
-         > fence.setting('max_staleness_ms')::bigint * interval '1 millisecond', true)
-      and fence.setting('max_staleness_ms')::bigint > 0,
-    (select count(*) from fence.outbox where synced_at is null),
-    (select count(*) from fence.outbox where error is not null),
-    (select count(*) from fence.refresh),
-    (select coalesce(sum(external_writes), 0)::bigint from fence.watch_state),
-    (select count(*) from fence.principal_state where state = 'unavailable')
+    (extract(epoch from (statement_timestamp() - (select max(heartbeat_at) from rebac.watch_state))) * 1000)::bigint,
+    coalesce((select max(heartbeat_at) from rebac.watch_state) is null
+      or statement_timestamp() - (select max(heartbeat_at) from rebac.watch_state)
+         > rebac.setting('max_staleness_ms')::bigint * interval '1 millisecond', true)
+      and rebac.setting('max_staleness_ms')::bigint > 0,
+    (select count(*) from rebac.outbox where synced_at is null),
+    (select count(*) from rebac.outbox where error is not null),
+    (select count(*) from rebac.refresh),
+    (select coalesce(sum(external_writes), 0)::bigint from rebac.watch_state),
+    (select count(*) from rebac.principal_state where state = 'unavailable')
 $$;
 
 -- Generate a row-level-security policy that fences reads of `tbl` on `container_column`, the principal read from a
 -- transaction-local setting. Refuses a table the current role owns (an owner bypasses RLS) unless force => true,
 -- which adds FORCE ROW LEVEL SECURITY.
-create or replace function fence.enable_rls(tbl regclass, container_column text,
-                                            principal_setting text default 'fence.principal',
+create or replace function rebac.enable_rls(tbl regclass, container_column text,
+                                            principal_setting text default 'rebac.principal',
                                             force boolean default false)
 returns void
 language plpgsql volatile as $$
@@ -752,14 +752,14 @@ declare owner_name name;
 begin
   select pg_get_userbyid(relowner) into owner_name from pg_class where oid = tbl::regclass;
   if owner_name = current_user and not force then
-    raise exception 'fence.enable_rls: % is owned by %, which bypasses row-level security', tbl, owner_name
-      using errcode = 'FN422', hint = 'pass force => true to add FORCE ROW LEVEL SECURITY';
+    raise exception 'rebac.enable_rls: % is owned by %, which bypasses row-level security', tbl, owner_name
+      using errcode = 'RB422', hint = 'pass force => true to add FORCE ROW LEVEL SECURITY';
   end if;
   execute format('alter table %s enable row level security', tbl);
   if force then execute format('alter table %s force row level security', tbl); end if;
-  execute format('drop policy if exists fence_read on %s', tbl);
+  execute format('drop policy if exists rebac_read on %s', tbl);
   execute format(
-    'create policy fence_read on %s for select using (%I in (select * from fence.readable_set(current_setting(%L))))',
+    'create policy rebac_read on %s for select using (%I in (select * from rebac.readable_set(current_setting(%L))))',
     tbl, container_column, principal_setting);
 end $$;
 
@@ -768,11 +768,11 @@ end $$;
 -- moves data between these functions and SpiceDB.
 -- -------------------------------------------------------------------------------------------------------------------
 
-alter table fence.refresh add column if not exists generation bigint not null default 0;
+alter table rebac.refresh add column if not exists generation bigint not null default 0;
 
 -- Resources whose readers a delivered arrow tuple may have changed (a file hung under a space, a container moved to
 -- a workspace). The daemon asks SpiceDB who can now view each one (LookupSubjects) and refreshes them.
-create table if not exists fence.refresh_resource (
+create table if not exists rebac.refresh_resource (
   tenant      text not null,
   resource    text not null,   -- a full SpiceDB reference, 'container:acme/file-1'
   zedtoken    text,
@@ -784,37 +784,37 @@ create table if not exists fence.refresh_resource (
 );
 
 -- One sweep per interval for the whole deployment, whichever replica claims it.
-create table if not exists fence.sweep_claim (
+create table if not exists rebac.sweep_claim (
   id      boolean primary key default true check (id),
   last_at timestamptz not null
 );
 
-create or replace function fence.enqueue_refresh(t text, p text, pri smallint, token text) returns void
+create or replace function rebac.enqueue_refresh(t text, p text, pri smallint, token text) returns void
 language sql volatile as $$
-  insert into fence.refresh (tenant, principal, priority, zedtoken, due_at, generation)
+  insert into rebac.refresh (tenant, principal, priority, zedtoken, due_at, generation)
   values (t, p, pri, token, now(), 1)
   on conflict (tenant, principal) do update
-    set priority = least(fence.refresh.priority, excluded.priority),
-        zedtoken = coalesce(excluded.zedtoken, fence.refresh.zedtoken),
-        due_at = least(fence.refresh.due_at, now()),
-        generation = fence.refresh.generation + 1
+    set priority = least(rebac.refresh.priority, excluded.priority),
+        zedtoken = coalesce(excluded.zedtoken, rebac.refresh.zedtoken),
+        due_at = least(rebac.refresh.due_at, now()),
+        generation = rebac.refresh.generation + 1
 $$;
 
 -- CLAIM A RELAY PASS: per tenant, revocations first, commit order within each, at most `per_tenant` from any one,
 -- and never a row whose relationship has an earlier row still undelivered, so no two relays reorder one
 -- relationship. The tenant walk is a loose index scan (one probe per tenant with pending work), and each tenant
 -- offers only its oldest `win` rows, so a flood in one tenant costs the others nothing.
-drop function if exists fence.claim_relay(integer, integer, integer);
-create or replace function fence.claim_relay(lim integer, per_tenant integer, win integer)
+drop function if exists rebac.claim_relay(integer, integer, integer);
+create or replace function rebac.claim_relay(lim integer, per_tenant integer, win integer)
 returns table (seq bigint, tenant text, op text, resource text, relation text, subject text, age_ms bigint)
 language plpgsql volatile as $$
 begin
   return query
   with candidates as (
     with recursive tenants(t) as (
-      (select o.tenant from fence.outbox o where o.synced_at is null order by o.tenant limit 1)
+      (select o.tenant from rebac.outbox o where o.synced_at is null order by o.tenant limit 1)
       union all
-      select (select o.tenant from fence.outbox o where o.synced_at is null and o.tenant > tenants.t
+      select (select o.tenant from rebac.outbox o where o.synced_at is null and o.tenant > tenants.t
               order by o.tenant limit 1)
       from tenants where tenants.t is not null
     )
@@ -823,9 +823,9 @@ begin
       select e.seq, e.revoke_last, row_number() over (order by e.revoke_last, e.seq) as rank
       from (
         select w.seq, (w.op <> 'delete') as revoke_last
-        from (select o.seq, o.op, o.resource, o.relation, o.subject from fence.outbox o
+        from (select o.seq, o.op, o.resource, o.relation, o.subject from rebac.outbox o
               where o.tenant = tenants.t and o.synced_at is null order by o.seq limit win) w
-        where not exists (select 1 from fence.outbox p
+        where not exists (select 1 from rebac.outbox p
                           where p.resource = w.resource and p.relation = w.relation and p.subject = w.subject
                             and p.seq < w.seq and p.synced_at is null)
         order by (w.op <> 'delete'), w.seq
@@ -838,9 +838,9 @@ begin
   ), locked as (
     -- Locked here and re-checked under the lock: another relay may have claimed or delivered a candidate since.
     select o.seq, o.tenant, o.op, o.resource, o.relation, o.subject, o.created_at
-    from fence.outbox o
+    from rebac.outbox o
     where o.seq in (select candidates.seq from candidates) and o.synced_at is null
-      and not exists (select 1 from fence.outbox p
+      and not exists (select 1 from rebac.outbox p
                       where p.resource = o.resource and p.relation = o.relation and p.subject = o.subject
                         and p.seq < o.seq and p.synced_at is null)
     for update of o skip locked
@@ -854,49 +854,49 @@ end $$;
 -- Record a delivery: rows delivered (with the token SpiceDB wrote them at), rows SpiceDB refused on their own
 -- (quarantined: kept, with the reason, never deleted), and the refreshes the delivered rows require, all in the
 -- caller's transaction, so a delivery recorded is a refresh recorded.
-create or replace function fence.record_delivery(delivered bigint[], token text, refused bigint[], reasons text[])
+create or replace function rebac.record_delivery(delivered bigint[], token text, refused bigint[], reasons text[])
 returns integer
 language plpgsql volatile as $$
 declare queued integer := 0; n integer;
 begin
-  update fence.outbox set synced_at = now(), zedtoken = token where seq = any(delivered);
-  update fence.outbox o set synced_at = now(), error = r.reason
+  update rebac.outbox set synced_at = now(), zedtoken = token where seq = any(delivered);
+  update rebac.outbox o set synced_at = now(), error = r.reason
   from unnest(refused, reasons) as r(seq, reason) where o.seq = r.seq;
 
   -- Direct and via relations name their subject: refresh the principals it stands for. A revocation first.
   with rows as (
     select o.tenant, o.op, o.subject
-    from fence.outbox o join fence.view_relation v
-      on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation and v.kind in ('direct', 'via', 'set')
+    from rebac.outbox o join rebac.view_relation v
+      on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation and v.kind in ('direct', 'via', 'set')
     where o.seq = any(delivered)
   ), targets as (
     select distinct r.tenant, p.principal, min(case when r.op = 'delete' then 0 else 1 end)::smallint as pri
-    from rows r cross join lateral fence.principals_of(r.tenant, r.subject) as p(principal)
+    from rows r cross join lateral rebac.principals_of(r.tenant, r.subject) as p(principal)
     group by r.tenant, p.principal
   )
-  select count(*) into n from targets t, lateral (select fence.enqueue_refresh(t.tenant, t.principal, t.pri, token)) x;
+  select count(*) into n from targets t, lateral (select rebac.enqueue_refresh(t.tenant, t.principal, t.pri, token)) x;
   queued := queued + n;
 
   -- Arrow tuples and grants to a subject set name no reader: queue their resource for a LookupSubjects.
-  insert into fence.refresh_resource (tenant, resource, zedtoken, due_at, generation)
+  insert into rebac.refresh_resource (tenant, resource, zedtoken, due_at, generation)
   select distinct o.tenant, o.resource, token, now(), 1
-  from fence.outbox o join fence.view_relation v
-    on v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation
+  from rebac.outbox o join rebac.view_relation v
+    on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation
    and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(o.subject, '#') > 0))
   where o.seq = any(delivered)
   on conflict (tenant, resource) do update
-    set zedtoken = excluded.zedtoken, due_at = least(fence.refresh_resource.due_at, now()),
-        generation = fence.refresh_resource.generation + 1;
+    set zedtoken = excluded.zedtoken, due_at = least(rebac.refresh_resource.due_at, now()),
+        generation = rebac.refresh_resource.generation + 1;
   get diagnostics n = row_count;
   return queued + n;
 end $$;
 
 -- Claim due refreshes under a lease; a lease that runs out is claimable again (a daemon that died mid-refresh).
-create or replace function fence.claim_refresh(lim integer, lease_ms integer)
+create or replace function rebac.claim_refresh(lim integer, lease_ms integer)
 returns table (tenant text, principal text, zedtoken text, attempts integer, generation bigint)
 language sql volatile as $$
-  update fence.refresh r set leased_until = now() + lease_ms * interval '1 millisecond'
-  from (select x.tenant, x.principal from fence.refresh x
+  update rebac.refresh r set leased_until = now() + lease_ms * interval '1 millisecond'
+  from (select x.tenant, x.principal from rebac.refresh x
         where x.due_at <= now() and (x.leased_until is null or x.leased_until < now())
         order by x.priority, x.due_at limit lim for update skip locked) c
   where r.tenant = c.tenant and r.principal = c.principal
@@ -904,25 +904,25 @@ language sql volatile as $$
 $$;
 
 -- Done: removed, unless it was enqueued again while it ran (then it stays, due now).
-create or replace function fence.complete_refresh(t text, p text, gen bigint) returns void
+create or replace function rebac.complete_refresh(t text, p text, gen bigint) returns void
 language sql volatile as $$
-  delete from fence.refresh where tenant = t and principal = p and generation = gen;
-  update fence.refresh set leased_until = null where tenant = t and principal = p
+  delete from rebac.refresh where tenant = t and principal = p and generation = gen;
+  update rebac.refresh set leased_until = null where tenant = t and principal = p
 $$;
 
 -- Failed: retried on a doubling ladder, capped at five minutes.
-create or replace function fence.fail_refresh(t text, p text, err text) returns void
+create or replace function rebac.fail_refresh(t text, p text, err text) returns void
 language sql volatile as $$
-  update fence.refresh set attempts = attempts + 1, leased_until = null, last_error = left(err, 500),
+  update rebac.refresh set attempts = attempts + 1, leased_until = null, last_error = left(err, 500),
     due_at = now() + least(power(2, least(attempts, 12)) * interval '1 second', interval '5 minutes')
   where tenant = t and principal = p
 $$;
 
-create or replace function fence.claim_refresh_resource(lim integer, lease_ms integer)
+create or replace function rebac.claim_refresh_resource(lim integer, lease_ms integer)
 returns table (tenant text, resource text, zedtoken text, generation bigint)
 language sql volatile as $$
-  update fence.refresh_resource r set leased_until = now() + lease_ms * interval '1 millisecond'
-  from (select x.tenant, x.resource from fence.refresh_resource x
+  update rebac.refresh_resource r set leased_until = now() + lease_ms * interval '1 millisecond'
+  from (select x.tenant, x.resource from rebac.refresh_resource x
         where x.due_at <= now() and (x.leased_until is null or x.leased_until < now())
         order by x.due_at limit lim for update skip locked) c
   where r.tenant = c.tenant and r.resource = c.resource
@@ -930,22 +930,22 @@ language sql volatile as $$
 $$;
 
 -- The subjects SpiceDB says can view a resource now: refresh the principals they stand for, and the resource is done.
-create or replace function fence.complete_refresh_resource(t text, res text, gen bigint, subjects text[], token text)
+create or replace function rebac.complete_refresh_resource(t text, res text, gen bigint, subjects text[], token text)
 returns integer
 language plpgsql volatile as $$
 declare n integer;
 begin
   select count(*) into n from (
-    select distinct p.principal from unnest(subjects) s cross join lateral fence.principals_of(t, s) as p(principal)
-  ) x, lateral (select fence.enqueue_refresh(t, x.principal, 1::smallint, token)) y;
-  delete from fence.refresh_resource where tenant = t and resource = res and generation = gen;
-  update fence.refresh_resource set leased_until = null where tenant = t and resource = res;
+    select distinct p.principal from unnest(subjects) s cross join lateral rebac.principals_of(t, s) as p(principal)
+  ) x, lateral (select rebac.enqueue_refresh(t, x.principal, 1::smallint, token)) y;
+  delete from rebac.refresh_resource where tenant = t and resource = res and generation = gen;
+  update rebac.refresh_resource set leased_until = null where tenant = t and resource = res;
   return n;
 end $$;
 
-create or replace function fence.fail_refresh_resource(t text, res text) returns void
+create or replace function rebac.fail_refresh_resource(t text, res text) returns void
 language sql volatile as $$
-  update fence.refresh_resource set attempts = attempts + 1, leased_until = null,
+  update rebac.refresh_resource set attempts = attempts + 1, leased_until = null,
     due_at = now() + least(power(2, least(attempts, 12)) * interval '1 second', interval '5 minutes')
   where tenant = t and resource = res
 $$;
@@ -953,44 +953,44 @@ $$;
 -- THE SLOW BACKSTOP. Claimed by one replica per interval. Re-sends each recent revocation ONCE, after it has settled
 -- (a grant a frozen relay landed late is withdrawn by that one re-send, because the relay's ordering delivers it
 -- after every earlier row for its relationship), and re-projects every principal at sweep priority.
-create or replace function fence.sweep(interval_ms bigint, settle_ms bigint, requeue boolean default true)
+create or replace function rebac.sweep(interval_ms bigint, settle_ms bigint, requeue boolean default true)
 returns table (requeued bigint, principals bigint)
 language plpgsql volatile as $$
 declare r bigint := 0; p bigint := 0; settle bigint := least(settle_ms, interval_ms);
 begin
-  insert into fence.sweep_claim (id, last_at) values (true, now())
+  insert into rebac.sweep_claim (id, last_at) values (true, now())
   on conflict (id) do update set last_at = now()
-  where fence.sweep_claim.last_at <= now() - interval_ms * interval '1 millisecond';
+  where rebac.sweep_claim.last_at <= now() - interval_ms * interval '1 millisecond';
   if not found then return query select 0::bigint, 0::bigint; return; end if;
   if requeue then
     with rq as (
-      update fence.outbox o set synced_at = null, zedtoken = null, requeued_at = now()
+      update rebac.outbox o set synced_at = null, zedtoken = null, requeued_at = now()
       where o.op = 'delete' and o.error is null and o.requeued_at is null
         and o.synced_at > now() - 2 * interval_ms * interval '1 millisecond'
         and o.synced_at <= now() - settle * interval '1 millisecond'
-        and exists (select 1 from fence.view_relation v
-                    where v.resource_type = fence.obj_type(o.resource) and v.relation = o.relation)
-        and not exists (select 1 from fence.outbox n where n.resource = o.resource and n.relation = o.relation
+        and exists (select 1 from rebac.view_relation v
+                    where v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation)
+        and not exists (select 1 from rebac.outbox n where n.resource = o.resource and n.relation = o.relation
                           and n.subject = o.subject and n.seq > o.seq)
       returning 1)
     select count(*) into r from rq;
   end if;
   with everyone as (
-    select tenant, principal from fence.principal_state where state <> 'retired'
-    union select tenant, principal from fence.subject
+    select tenant, principal from rebac.principal_state where state <> 'retired'
+    union select tenant, principal from rebac.subject
   ), q as (
-    insert into fence.refresh (tenant, principal, priority, due_at, generation)
+    insert into rebac.refresh (tenant, principal, priority, due_at, generation)
     select tenant, principal, 2, now(), 1 from everyone
-    on conflict (tenant, principal) do update set generation = fence.refresh.generation + 1,
-      due_at = least(fence.refresh.due_at, now())
+    on conflict (tenant, principal) do update set generation = rebac.refresh.generation + 1,
+      due_at = least(rebac.refresh.due_at, now())
     returning 1)
   select count(*) into p from q;
   return query select r, p;
 end $$;
 
 -- Liveness: the daemon beats this while it can reach SpiceDB and Postgres; reads fail closed when it stops.
-create or replace function fence.heartbeat(sc text default '*') returns void
+create or replace function rebac.heartbeat(sc text default '*') returns void
 language sql volatile as $$
-  insert into fence.watch_state (scope, heartbeat_at) values (sc, now())
+  insert into rebac.watch_state (scope, heartbeat_at) values (sc, now())
   on conflict (scope) do update set heartbeat_at = now()
 $$;

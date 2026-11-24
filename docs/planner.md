@@ -10,7 +10,7 @@ breadth. This page measures it. Reproduce it with `examples/hybrid-pgvector/` (`
 - Embeddings are 200 clustered topics, each passage a topic centre plus noise; queries are near a topic. Topic and
   container are independent.
 - HNSW at the defaults (`m = 16`, `ef_construction = 64`, `ef_search = 40`), cosine distance.
-- `fence.readable` holds 875,000 rows: eight named readers at fixed breadths, and 2,000 background readers whose
+- `rebac.readable` holds 875,000 rows: eight named readers at fixed breadths, and 2,000 background readers whose
   breadths are skewed (most read a little, a few read a lot), so the statistics look like a tenant's.
 - k = 20, 10 queries per cell. "rows/k" is the fraction of k rows returned. "recall" is recall@20 against the exact
   answer over the reader's own passages.
@@ -73,12 +73,12 @@ unfenced HNSW baseline p50 1.9 ms
 
 Modes:
 
-- **ann, iterative off**: `container in (select * from fence.readable_set(p)) order by embedding <=> q limit 20`,
+- **ann, iterative off**: `container in (select * from rebac.readable_set(p)) order by embedding <=> q limit 20`,
   with `hnsw.iterative_scan = off` (pgvector's default).
 - **ann, relaxed_order**: the same query with `hnsw.iterative_scan = relaxed_order`.
 - **exact (in, CTE)**: the reader's passages through the `in` form, materialised, then sorted exactly.
-- **exact (array)**: `container = any(array(select * from fence.readable_set(p)))`, sorted exactly.
-- **auto (by breadth)**: exact (array) below 50 containers (`fence.breadth(p)`), otherwise relaxed ANN.
+- **exact (array)**: `container = any(array(select * from rebac.readable_set(p)))`, sorted exactly.
+- **auto (by breadth)**: exact (array) below 50 containers (`rebac.breadth(p)`), otherwise relaxed ANN.
 
 ## What it shows
 
@@ -95,18 +95,18 @@ Modes:
    exact took 7 ms and ANN took 12 ms at recall 0.95.
 4. **The planner does not know a reader's breadth.** Without a per-principal statistic, it estimates every reader at
    the tenant's average: 451 containers for a reader of 5. Fed through the `in` form, that estimate produced a
-   parallel sequential scan of `fence.readable` and cost 15 to 25 ms where 1.6 ms was possible. The array form avoids
+   parallel sequential scan of `rebac.readable` and cost 15 to 25 ms where 1.6 ms was possible. The array form avoids
    it, because the planner treats an InitPlan array as small, and that is what a narrow reader is.
-5. **The choice is the application's, and it is cheap.** `fence.breadth(p)` is one primary-key read. Routing on it
+5. **The choice is the application's, and it is cheap.** `rebac.breadth(p)` is one primary-key read. Routing on it
    gave the best of both paths at every breadth in this data. A larger `ef_search` raised the broad readers' recall
    (0.84 to 0.97 at 100%) and changed little for narrow ones, whose recall is bounded by the scan limit.
 
 ## Recommendations
 
-- Fence an ANN leg with `container in (select * from fence.readable_set(p))` and `set local hnsw.iterative_scan =
+- Fence an ANN leg with `container in (select * from rebac.readable_set(p))` and `set local hnsw.iterative_scan =
   relaxed_order`.
 - Route readers below a few thousand candidate rows to the exact path, as
-  `container = any(array(select * from fence.readable_set(p)))`, using `fence.breadth(p)`.
+  `container = any(array(select * from rebac.readable_set(p)))`, using `rebac.breadth(p)`.
 - Use custom plans (`plan_cache_mode = force_custom_plan`) for fenced reads, so each plan sees its own reader.
 - Not settled here, and still to measure: a planner support function (C mode) that supplies the per-principal
   selectivity, so the planner can choose the path itself; Postgres 18; and tenants with skewed passages per container.

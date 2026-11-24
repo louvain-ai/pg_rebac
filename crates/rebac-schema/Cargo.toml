@@ -1,5 +1,5 @@
 [package]
-name = "fence-schema"
+name = "rebac-schema"
 description = "Parses a SpiceDB schema and derives which relations can change one permission"
 version.workspace = true
 edition.workspace = true

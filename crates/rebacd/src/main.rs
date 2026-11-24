@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use fenced::{
+use rebacd::{
     backfill, closure,
     config::{Config, Mode},
     http, loops, verify, Ctx,
@@ -7,10 +7,10 @@ use fenced::{
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Parser)]
-#[command(name = "fenced", version, about = "The pg_fence sync daemon")]
+#[command(name = "rebacd", version, about = "The pg_rebac sync daemon")]
 struct Cli {
-    /// fence.toml; without one, the defaults (DATABASE_URL, SPICEDB_TOKEN, SpiceDB on 127.0.0.1:50051).
-    #[arg(long, global = true, env = "FENCED_CONFIG")]
+    /// rebac.toml; without one, the defaults (DATABASE_URL, SPICEDB_TOKEN, SpiceDB on 127.0.0.1:50051).
+    #[arg(long, global = true, env = "REBACD_CONFIG")]
     config: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
@@ -20,10 +20,10 @@ struct Cli {
 enum Cmd {
     /// Run the loops: relay, refresh, sweep, heartbeat, Watch (observe-only), and the lazy-lookup endpoint.
     Run {
-        /// Replace fence.view_relation when the schema's closure differs from it (and re-project everyone).
+        /// Replace rebac.view_relation when the schema's closure differs from it (and re-project everyone).
         #[arg(long)]
         accept_schema: bool,
-        /// Write only fence.readable_shadow and relay nothing (overrides the config's mode).
+        /// Write only rebac.readable_shadow and relay nothing (overrides the config's mode).
         #[arg(long)]
         shadow: bool,
     },
@@ -48,7 +48,7 @@ enum Cmd {
         #[arg(long)]
         shadow: bool,
     },
-    /// Print the closure derived from the live schema; --write stores it in fence.view_relation.
+    /// Print the closure derived from the live schema; --write stores it in rebac.view_relation.
     Closure {
         #[arg(long)]
         write: bool,
@@ -181,7 +181,7 @@ async fn run(ctx: Arc<Ctx>) -> anyhow::Result<()> {
         ));
     }
     let listener = tokio::net::TcpListener::bind(&ctx.config.listen).await?;
-    tracing::info!(listen = %ctx.config.listen, mode = ?ctx.config.mode, "fenced running");
+    tracing::info!(listen = %ctx.config.listen, mode = ?ctx.config.mode, "rebacd running");
     let mut srv_stop = stop.clone();
     let server = tokio::spawn(async move {
         axum::serve(listener, http::router(ctx))

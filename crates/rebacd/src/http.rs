@@ -1,5 +1,5 @@
-//! The lazy first read, over HTTP. A read that raises FN404 (never projected) asks here, then retries. The answer is
-//! written down, an empty one included; a lookup SpiceDB cannot answer marks the principal unavailable (FN503 on the
+//! The lazy first read, over HTTP. A read that raises RB404 (never projected) asks here, then retries. The answer is
+//! written down, an empty one included; a lookup SpiceDB cannot answer marks the principal unavailable (RB503 on the
 //! next read, never an empty set) and queues it for retry.
 
 use crate::{project, Ctx};
@@ -41,7 +41,7 @@ async fn lookup(
             StatusCode::BAD_REQUEST,
             Json(LookupReply {
                 containers: None,
-                error: Some("fence_no_tenant"),
+                error: Some("rebac_no_tenant"),
             }),
         );
     }
@@ -66,13 +66,13 @@ async fn lookup(
             if let Ok(c) = ctx.pool.get().await {
                 let _ = c
                     .execute(
-                        "select fence.mark_unavailable($1, $2, 'lookup_failed')",
+                        "select rebac.mark_unavailable($1, $2, 'lookup_failed')",
                         &[&b.tenant, &b.principal],
                     )
                     .await;
                 let _ = c
                     .execute(
-                        "select fence.enqueue_refresh($1, $2, 0::smallint, null)",
+                        "select rebac.enqueue_refresh($1, $2, 0::smallint, null)",
                         &[&b.tenant, &b.principal],
                     )
                     .await;
@@ -81,7 +81,7 @@ async fn lookup(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(LookupReply {
                     containers: None,
-                    error: Some("fence_unavailable"),
+                    error: Some("rebac_unavailable"),
                 }),
             )
         }
@@ -94,7 +94,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json::Va
         let row = c
             .query_one(
                 "select heartbeat_age_ms, stale, pending_outbox, quarantined, refresh_queue, external_writes,
-                        unavailable_principals from fence.status()",
+                        unavailable_principals from rebac.status()",
                 &[],
             )
             .await?;

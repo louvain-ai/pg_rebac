@@ -74,7 +74,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     .await?;
     let claimed = tx
         .query(
-            "select seq, op, resource, relation, subject, age_ms from fence.claim_relay($1, $2, $3)",
+            "select seq, op, resource, relation, subject, age_ms from rebac.claim_relay($1, $2, $3)",
             &[&c.relay_batch, &c.relay_per_tenant, &c.relay_window],
         )
         .await?;
@@ -98,7 +98,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     // Revocations narrow again at claim: a no-op when their transaction narrowed, the safety net when it did not.
     let deletes: Vec<i64> = rows.iter().filter(|r| !r.op.touch).map(|r| r.seq).collect();
     let narrowed: i32 = tx
-        .query_one("select fence.narrow_seqs($1)", &[&deletes])
+        .query_one("select rebac.narrow_seqs($1)", &[&deletes])
         .await?
         .get(0);
 
@@ -157,7 +157,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
         .collect();
     let (rs, reasons): (Vec<i64>, Vec<String>) = refused.into_iter().unzip();
     tx.query_one(
-        "select fence.record_delivery($1, $2, $3, $4)",
+        "select rebac.record_delivery($1, $2, $3, $4)",
         &[&delivered, &token, &rs, &reasons],
     )
     .await?;

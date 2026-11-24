@@ -1,6 +1,6 @@
 [package]
-name = "fenced"
-description = "The pg_fence sync daemon: relays relationship writes to SpiceDB and keeps the projection in Postgres"
+name = "rebacd"
+description = "The pg_rebac sync daemon: relays relationship writes to SpiceDB and keeps the projection in Postgres"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-fence-schema = { path = "../fence-schema" }
+rebac-schema = { path = "../rebac-schema" }
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }

@@ -5,11 +5,11 @@ For each reader and each mode it reports the plan the planner chose, the median 
 back, and recall@k against the exact answer over the reader's own passages. Drives psql, so it needs nothing but
 Python 3 and a database built by setup.sql.
 
-    FENCE_BENCH_URL=postgres://... python3 bench.py [--k 20] [--queries 10]
+    REBAC_BENCH_URL=postgres://... python3 bench.py [--k 20] [--queries 10]
 """
 import argparse, json, os, statistics, subprocess
 
-URL = os.environ.get("FENCE_BENCH_URL", "postgres://postgres:fence@127.0.0.1:55432/fence_bench")
+URL = os.environ.get("REBAC_BENCH_URL", "postgres://postgres:rebac@127.0.0.1:55433/rebac_bench")
 READERS = ["b0001", "b001", "b005", "b010", "b020", "b030", "b050", "b100"]
 
 
@@ -21,7 +21,7 @@ def psql(sql: str) -> str:
 
 
 def fenced(p: str, q: str, k: int) -> str:
-    return (f"select id from passage where tenant = 'acme' and container in (select * from fence.readable_set('{p}')) "
+    return (f"select id from passage where tenant = 'acme' and container in (select * from rebac.readable_set('{p}')) "
             f"order by embedding <=> '{q}' limit {k}")
 
 
@@ -29,20 +29,20 @@ def exact(p: str, q: str, k: int) -> str:
     # The exact path: the reader's containers as one array (an InitPlan), a bitmap scan of passage(tenant, container),
     # and an exact sort. The array form keeps the planner from misjudging the reader's breadth.
     return (f"select id from passage where tenant = 'acme' and container = any(array(select * from "
-            f"fence.readable_set('{p}'))) order by embedding <=> '{q}' limit {k}")
+            f"rebac.readable_set('{p}'))) order by embedding <=> '{q}' limit {k}")
 
 
 def exact_in(p: str, q: str, k: int) -> str:
     return (f"with s as materialized (select id, embedding from passage where tenant = 'acme' and container in "
-            f"(select * from fence.readable_set('{p}'))) select id from s order by embedding <=> '{q}' limit {k}")
+            f"(select * from rebac.readable_set('{p}'))) select id from s order by embedding <=> '{q}' limit {k}")
 
 
-# Route by breadth: what an application (or a future helper) does with fence.breadth().
-EXACT_BELOW_CONTAINERS = int(os.environ.get("FENCE_EXACT_BELOW", "50"))
+# Route by breadth: what an application (or a future helper) does with rebac.breadth().
+EXACT_BELOW_CONTAINERS = int(os.environ.get("REBAC_EXACT_BELOW", "50"))
 
 
 def auto(p: str, q: str, k: int) -> str:
-    n = int(psql(f"set fence.tenant = 'acme'; select fence.breadth('{p}')").strip().split()[-1])
+    n = int(psql(f"set rebac.tenant = 'acme'; select rebac.breadth('{p}')").strip().split()[-1])
     return exact(p, q, k) if n < EXACT_BELOW_CONTAINERS else fenced(p, q, k)
 
 
@@ -67,7 +67,7 @@ def plan_summary(node, acc):
 
 
 def run(prelude: str, query: str):
-    sql = f"set fence.tenant = 'acme'; set jit = off; {prelude}\nexplain (analyze, format json) {query};\n{query};"
+    sql = f"set rebac.tenant = 'acme'; set jit = off; {prelude}\nexplain (analyze, format json) {query};\n{query};"
     out = psql(sql).strip().split("\n")
     # psql -A prints the JSON plan as one block, then the ids one per line.
     text = "\n".join(out)
@@ -93,8 +93,8 @@ def main():
     print(f"passages={psql('select count(*) from passage').strip()} containers={total} k={args.k} queries={args.queries}")
     print(f"{'reader':8} {'breadth':>8} {'passages':>9} | {'mode':20} {'plan':34} {'p50 ms':>8} {'max ms':>8} {'rows/k':>7} {'recall':>7}")
     for p in READERS:
-        n = int(psql(f"select count(*) from fence.readable where tenant = 'acme' and principal = '{p}'").strip())
-        reach = int(psql(f"select count(*) from passage where container in (select container from fence.readable where tenant='acme' and principal='{p}')").strip())
+        n = int(psql(f"select count(*) from rebac.readable where tenant = 'acme' and principal = '{p}'").strip())
+        reach = int(psql(f"select count(*) from passage where container in (select container from rebac.readable where tenant='acme' and principal='{p}')").strip())
         truth = {}
         for q in queries:
             truth[q] = run("", exact(p, q, args.k))[1]

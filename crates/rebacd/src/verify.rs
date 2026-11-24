@@ -1,4 +1,4 @@
-//! `fenced verify`: the projection diffed against SpiceDB. EXTRA rows (the projection grants what SpiceDB does not)
+//! `rebacd verify`: the projection diffed against SpiceDB. EXTRA rows (the projection grants what SpiceDB does not)
 //! are a fence violation and fail the command; MISSING rows (SpiceDB grants what the projection lacks) are a
 //! freshness gap, reported and bounded. They are never summed. Only counts are printed: an id is tenant content.
 
@@ -20,7 +20,7 @@ pub struct Diff {
 pub enum Against {
     /// SpiceDB, minus pending revocations.
     SpiceDb,
-    /// `fence.readable_shadow` (what a shadow daemon projected), with no SpiceDB call.
+    /// `rebac.readable_shadow` (what a shadow daemon projected), with no SpiceDB call.
     Shadow,
 }
 
@@ -34,7 +34,7 @@ pub async fn diff(
     let db = ctx.pool.get().await?;
     let principals: Vec<String> = db
         .query(
-            "select principal from fence.principal_state where tenant = $1 and state = 'projected'
+            "select principal from rebac.principal_state where tenant = $1 and state = 'projected'
              order by random() limit $2",
             &[&tenant, &sample.unwrap_or(i64::MAX)],
         )
@@ -42,7 +42,7 @@ pub async fn diff(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    let sql = format!("select container from fence.{table} where tenant = $1 and principal = $2");
+    let sql = format!("select container from rebac.{table} where tenant = $1 and principal = $2");
     let mut d = Diff::default();
     for p in principals {
         // The projection first, then the authority: a container revoked in between reads as missing, never extra.
@@ -55,7 +55,7 @@ pub async fn diff(
         let want: BTreeSet<String> = match against {
             Against::SpiceDb => {
                 let pending: BTreeSet<String> = db
-                    .query("select fence.pending_revoked($1, $2)", &[&tenant, &p])
+                    .query("select rebac.pending_revoked($1, $2)", &[&tenant, &p])
                     .await?
                     .iter()
                     .map(|r| r.get(0))
@@ -69,7 +69,7 @@ pub async fn diff(
                 }
             }
             Against::Shadow => db
-                .query("select container from fence.readable_shadow where tenant = $1 and principal = $2", &[&tenant, &p])
+                .query("select container from rebac.readable_shadow where tenant = $1 and principal = $2", &[&tenant, &p])
                 .await?
                 .iter()
                 .map(|r| r.get(0))
@@ -91,8 +91,8 @@ pub async fn isolation(ctx: &Ctx) -> anyhow::Result<Diff> {
     let db = ctx.pool.get().await?;
     let tenants: Vec<String> = db
         .query(
-            "select distinct tenant from fence.principal_state where principal in
-               (select principal from fence.principal_state group by principal having count(distinct tenant) > 1)",
+            "select distinct tenant from rebac.principal_state where principal in
+               (select principal from rebac.principal_state group by principal having count(distinct tenant) > 1)",
             &[],
         )
         .await?

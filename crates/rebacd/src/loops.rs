@@ -57,13 +57,13 @@ pub async fn refresh_pass(ctx: &Ctx, concurrency: usize) -> anyhow::Result<usize
     let client = ctx.pool.get().await?;
     let claimed = client
         .query(
-            "select tenant, principal, zedtoken, generation from fence.claim_refresh($1, $2)",
+            "select tenant, principal, zedtoken, generation from rebac.claim_refresh($1, $2)",
             &[&((concurrency * 4) as i32), &ctx.config.refresh_lease_ms],
         )
         .await?;
     let resources = client
         .query(
-            "select tenant, resource, zedtoken, generation from fence.claim_refresh_resource($1, $2)",
+            "select tenant, resource, zedtoken, generation from rebac.claim_refresh_resource($1, $2)",
             &[&((concurrency * 4) as i32), &ctx.config.refresh_lease_ms],
         )
         .await?;
@@ -78,12 +78,12 @@ pub async fn refresh_pass(ctx: &Ctx, concurrency: usize) -> anyhow::Result<usize
             let Ok(c) = ctx.pool.get().await else { return };
             let r = match result {
                 Ok(_) => {
-                    c.execute("select fence.complete_refresh($1, $2, $3)", &[&t, &p, &gen])
+                    c.execute("select rebac.complete_refresh($1, $2, $3)", &[&t, &p, &gen])
                         .await
                 }
                 Err(e) => {
                     c.execute(
-                        "select fence.fail_refresh($1, $2, $3)",
+                        "select rebac.fail_refresh($1, $2, $3)",
                         &[&t, &p, &e.to_string()],
                     )
                     .await
@@ -111,13 +111,13 @@ pub async fn refresh_pass(ctx: &Ctx, concurrency: usize) -> anyhow::Result<usize
         match subjects {
             Ok(s) => {
                 c.execute(
-                    "select fence.complete_refresh_resource($1, $2, $3, $4, $5)",
+                    "select rebac.complete_refresh_resource($1, $2, $3, $4, $5)",
                     &[&t, &res, &gen, &s, &tok],
                 )
                 .await?;
             }
             Err(_) => {
-                c.execute("select fence.fail_refresh_resource($1, $2)", &[&t, &res])
+                c.execute("select rebac.fail_refresh_resource($1, $2)", &[&t, &res])
                     .await?;
             }
         }
@@ -137,7 +137,7 @@ pub async fn sweep_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
             let c = ctx.pool.get().await?;
             let row = c
                 .query_one(
-                    "select requeued, principals from fence.sweep($1, $2, $3)",
+                    "select requeued, principals from rebac.sweep($1, $2, $3)",
                     &[
                         &ctx.config.sweep_interval_ms,
                         &ctx.config.sweep_settle_ms,
@@ -168,7 +168,7 @@ pub async fn heartbeat_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
             .await
         {
             Ok(_) => match ctx.pool.get().await {
-                Ok(c) => c.execute("select fence.heartbeat('*')", &[]).await.is_ok(),
+                Ok(c) => c.execute("select rebac.heartbeat('*')", &[]).await.is_ok(),
                 Err(_) => false,
             },
             Err(_) => false,
@@ -187,8 +187,8 @@ pub async fn heartbeat_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
 }
 
 /// WATCH, OBSERVE-ONLY. Follows SpiceDB's changes to the projected types and counts the ones that did not come through
-/// `fence.write` (another service, the zed CLI): they are narrowed only by the sweep in slice 1, and `fence.status()`
-/// says how many there were. Its position is kept in `fence.watch_state`.
+/// `rebac.write` (another service, the zed CLI): they are narrowed only by the sweep in slice 1, and `rebac.status()`
+/// says how many there were. Its position is kept in `rebac.watch_state`.
 pub async fn watch_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
     let mut failures = 0u32;
     while !*stop.borrow() {
@@ -211,14 +211,14 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
     let c = ctx.pool.get().await?;
     let from: Option<String> = c
         .query_opt(
-            "select zedtoken from fence.watch_state where scope = 'watch'",
+            "select zedtoken from rebac.watch_state where scope = 'watch'",
             &[],
         )
         .await?
         .and_then(|r| r.get(0));
     let types: Vec<String> = c
         .query(
-            "select distinct resource_type from fence.view_relation",
+            "select distinct resource_type from rebac.view_relation",
             &[],
         )
         .await?
@@ -257,7 +257,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
             };
             let ours: bool = c
                 .query_one(
-                    "select exists (select 1 from fence.outbox where resource = $1 and relation = $2 and subject = $3
+                    "select exists (select 1 from rebac.outbox where resource = $1 and relation = $2 and subject = $3
                        and op = $4 and (synced_at is null or synced_at > now() - interval '1 hour'))",
                     &[&resource, &rel.relation, &subject, &op],
                 )
@@ -269,21 +269,21 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
         }
         if msg.schema_updated {
             tracing::warn!(
-                "the SpiceDB schema changed; restart fenced to re-derive and check the closure"
+                "the SpiceDB schema changed; restart rebacd to re-derive and check the closure"
             );
         }
         let token = msg.changes_through.map(|t| t.token);
         c.execute(
-            "insert into fence.watch_state (scope, zedtoken, external_writes) values ('watch', $1, $2)
-             on conflict (scope) do update set zedtoken = coalesce(excluded.zedtoken, fence.watch_state.zedtoken),
-               external_writes = fence.watch_state.external_writes + excluded.external_writes",
+            "insert into rebac.watch_state (scope, zedtoken, external_writes) values ('watch', $1, $2)
+             on conflict (scope) do update set zedtoken = coalesce(excluded.zedtoken, rebac.watch_state.zedtoken),
+               external_writes = rebac.watch_state.external_writes + excluded.external_writes",
             &[&token, &external],
         )
         .await?;
         if external > 0 {
             tracing::warn!(
                 external,
-                "relationship changes not made through fence.write (narrowed by the sweep only)"
+                "relationship changes not made through rebac.write (narrowed by the sweep only)"
             );
         }
     }

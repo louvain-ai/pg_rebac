@@ -48,13 +48,13 @@ pub async fn lookup(
     deadline: Duration,
 ) -> Result<(BTreeSet<String>, Projected), ProjectError> {
     let subjects: Vec<String> = db
-        .query("select fence.subjects_of($1, $2)", &[&tenant, &principal])
+        .query("select rebac.subjects_of($1, $2)", &[&tenant, &principal])
         .await?
         .iter()
         .map(|r| r.get(0))
         .collect();
     let prefix: String = db
-        .query_one("select fence.prefix($1)", &[&tenant])
+        .query_one("select rebac.prefix($1)", &[&tenant])
         .await?
         .get(0);
     let mut out = BTreeSet::new();
@@ -100,13 +100,13 @@ pub async fn refresh_one(
     let mut client = ctx.pool.get().await.map_err(anyhow::Error::from)?;
     let tx = client.transaction().await?;
     tx.execute(
-        "select fence.lock_principal($1, $2)",
+        "select rebac.lock_principal($1, $2)",
         &[&tenant, &principal],
     )
     .await?;
     let pending: BTreeSet<String> = tx
         .query(
-            "select fence.pending_revoked($1, $2)",
+            "select rebac.pending_revoked($1, $2)",
             &[&tenant, &principal],
         )
         .await?
@@ -121,7 +121,7 @@ pub async fn refresh_one(
     };
     stats.containers = tx
         .query_one(
-            "select fence.project($1, $2, $3, $4, $5)",
+            "select rebac.project($1, $2, $3, $4, $5)",
             &[&tenant, &principal, &containers, &token, &target],
         )
         .await?

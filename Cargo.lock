@@ -357,35 +357,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "fence-schema"
-version = "0.1.0"
-
-[[package]]
-name = "fenced"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "deadpool-postgres",
- "fence-schema",
- "futures",
- "prost",
- "prost-types",
- "protox",
- "serde",
- "serde_json",
- "tokio",
- "tokio-postgres",
- "toml",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "fixedbitset"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1190,6 +1161,35 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rebac-schema"
+version = "0.1.0"
+
+[[package]]
+name = "rebacd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "deadpool-postgres",
+ "futures",
+ "prost",
+ "prost-types",
+ "protox",
+ "rebac-schema",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "toml",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "redox_syscall"

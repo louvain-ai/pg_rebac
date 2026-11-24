@@ -31,7 +31,7 @@ begin
 end $$;
 
 create or replace function t.set_of(p text) returns text[]
-language sql as $$ select coalesce(array_agg(c order by c), '{}') from fence.readable_set(p) c $$;
+language sql as $$ select coalesce(array_agg(c order by c), '{}') from rebac.readable_set(p) c $$;
 
 -- The schema shape slice 1 supports, as the daemon would derive it from:
 --   definition workspace { relation admin: user }
@@ -40,8 +40,8 @@ language sql as $$ select coalesce(array_agg(c order by c), '{}') from fence.rea
 --     permission view = member + editor + workspace->admin + parent->view }
 create or replace function t.fixture_relations() returns void
 language sql as $$
-  delete from fence.view_relation;
-  insert into fence.view_relation (resource_type, relation, kind, target_type, through) values
+  delete from rebac.view_relation;
+  insert into rebac.view_relation (resource_type, relation, kind, target_type, through) values
     ('container', 'member', 'direct', null, null),
     ('container', 'editor', 'direct', null, null),
     ('container', 'parent', 'arrow', 'container', null),
@@ -52,7 +52,7 @@ $$;
 -- A live heartbeat, so the staleness bound does not get in the way of tests about something else.
 create or replace function t.beat() returns void
 language sql as $$
-  insert into fence.watch_state (scope, heartbeat_at) values ('*', clock_timestamp())
+  insert into rebac.watch_state (scope, heartbeat_at) values ('*', clock_timestamp())
   on conflict (scope) do update set heartbeat_at = clock_timestamp()
 $$;
 
@@ -60,5 +60,5 @@ $$;
 create or replace function t.fixture_relations_with_sets() returns void
 language sql as $$
   select t.fixture_relations();
-  insert into fence.view_relation (resource_type, relation, kind) values ('group', 'member', 'set');
+  insert into rebac.view_relation (resource_type, relation, kind) values ('group', 'member', 'set');
 $$;

@@ -1,4 +1,4 @@
-//! fenced: the pg_fence sync daemon.
+//! rebacd: the pg_rebac sync daemon.
 
 #[allow(clippy::all, missing_docs)]
 pub mod authzed {

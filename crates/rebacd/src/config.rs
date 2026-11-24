@@ -1,5 +1,5 @@
 //! The daemon's configuration: how to reach SpiceDB and Postgres, and how hard to run. What is projected (the
-//! resource type, the permission, the tenant separator) is NOT here: it lives in `fence.config`, the one table the SQL
+//! resource type, the permission, the tenant separator) is NOT here: it lives in `rebac.config`, the one table the SQL
 //! and the daemon both read, so the two cannot disagree.
 
 use serde::Deserialize;
@@ -16,9 +16,9 @@ pub enum Consistency {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// Relay the outbox and keep `fence.readable`.
+    /// Relay the outbox and keep `rebac.readable`.
     Live,
-    /// Write only `fence.readable_shadow`, relay nothing, re-send nothing: for proving a projection before it is used.
+    /// Write only `rebac.readable_shadow`, relay nothing, re-send nothing: for proving a projection before it is used.
     Shadow,
 }
 

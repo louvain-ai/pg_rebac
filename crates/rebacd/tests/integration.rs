@@ -1,7 +1,7 @@
 //! The daemon against a real SpiceDB and a real Postgres (`docker compose up -d --wait` at the repo root).
-//! Runs only with FENCE_IT=1, and says SKIPPED loudly otherwise: a fence test that silently passes is worse than none.
+//! Runs only with REBAC_IT=1, and says SKIPPED loudly otherwise: a fence test that silently passes is worse than none.
 
-use fenced::{
+use rebacd::{
     backfill, closure,
     config::{Config, Mode},
     loops, project, relay,
@@ -29,15 +29,15 @@ definition container {
 "#;
 
 fn enabled() -> bool {
-    if std::env::var("FENCE_IT").as_deref() == Ok("1") {
+    if std::env::var("REBAC_IT").as_deref() == Ok("1") {
         return true;
     }
-    eprintln!("!!!!!!!! SKIPPED: the fenced integration test needs FENCE_IT=1 and `docker compose up -d --wait`");
+    eprintln!("!!!!!!!! SKIPPED: the rebacd integration test needs REBAC_IT=1 and `docker compose up -d --wait`");
     false
 }
 
-const PG: &str = "postgres://postgres:fence@127.0.0.1:55433";
-const KEY: &str = "fence-test-key";
+const PG: &str = "postgres://postgres:rebac@127.0.0.1:55433";
+const KEY: &str = "rebac-test-key";
 
 async fn fresh_db(name: &str) -> String {
     let (admin, conn) = tokio_postgres::connect(&format!("{PG}/postgres"), tokio_postgres::NoTls)
@@ -57,7 +57,7 @@ async fn fresh_db(name: &str) -> String {
         .await
         .unwrap();
     tokio::spawn(conn);
-    let sql = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../sql/fence.sql"))
+    let sql = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../sql/rebac.sql"))
         .unwrap();
     db.batch_execute(&format!("set client_min_messages = warning; {sql}"))
         .await
@@ -69,7 +69,7 @@ fn config(url_env: &str, endpoint: &str, mode: Mode) -> Config {
     Config {
         database_url_env: url_env.into(),
         spicedb_endpoint: endpoint.into(),
-        spicedb_token_env: "FENCE_IT_TOKEN".into(),
+        spicedb_token_env: "REBAC_IT_TOKEN".into(),
         mode,
         deadline_ms: 2_000,
         read_deadline_ms: 2_000,
@@ -89,7 +89,7 @@ fn op(touch: bool, resource: &str, relation: &str, subject: &str) -> TupleOp {
 async fn set_of(ctx: &Ctx, tenant: &str, p: &str) -> Vec<String> {
     let c = ctx.pool.get().await.unwrap();
     c.query(
-        "select container from fence.readable where tenant = $1 and principal = $2 order by 1",
+        "select container from rebac.readable where tenant = $1 and principal = $2 order by 1",
         &[&tenant, &p],
     )
     .await
@@ -114,14 +114,14 @@ async fn the_daemon_end_to_end() {
     if !enabled() {
         return;
     }
-    std::env::set_var("FENCE_IT_TOKEN", KEY);
-    let url = fresh_db("fenced_it").await;
-    std::env::set_var("FENCE_IT_DB", &url);
+    std::env::set_var("REBAC_IT_TOKEN", KEY);
+    let url = fresh_db("rebacd_it").await;
+    std::env::set_var("REBAC_IT_DB", &url);
     let endpoint =
-        std::env::var("FENCE_IT_SPICEDB").unwrap_or_else(|_| "http://127.0.0.1:50061".into());
+        std::env::var("REBAC_IT_SPICEDB").unwrap_or_else(|_| "http://127.0.0.1:50061".into());
 
-    // A fresh SpiceDB: the schema, and relationships written by "someone else" before pg_fence existed.
-    let s = SpiceDb::connect(&endpoint, KEY, fenced::config::Consistency::FullyConsistent)
+    // A fresh SpiceDB: the schema, and relationships written by "someone else" before pg_rebac existed.
+    let s = SpiceDb::connect(&endpoint, KEY, rebacd::config::Consistency::FullyConsistent)
         .await
         .unwrap();
     s.write_schema(SCHEMA, Duration::from_secs(5))
@@ -163,7 +163,7 @@ async fn the_daemon_end_to_end() {
     .await
     .unwrap();
 
-    let ctx = Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Live))
+    let ctx = Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
         .await
         .unwrap();
 
@@ -174,7 +174,7 @@ async fn the_daemon_end_to_end() {
         .get()
         .await
         .unwrap()
-        .query_one("select count(*) from fence.view_relation", &[])
+        .query_one("select count(*) from rebac.view_relation", &[])
         .await
         .unwrap()
         .get(0);
@@ -184,7 +184,7 @@ async fn the_daemon_end_to_end() {
     );
     sql(
         &ctx,
-        "delete from fence.view_relation where relation = 'editor'",
+        "delete from rebac.view_relation where relation = 'editor'",
     )
     .await;
     assert!(
@@ -211,7 +211,7 @@ async fn the_daemon_end_to_end() {
         .await
         .unwrap()
         .query_one(
-            "select count(*) from fence.set_grant where tenant = 'acme'",
+            "select count(*) from rebac.set_grant where tenant = 'acme'",
             &[],
         )
         .await
@@ -238,8 +238,8 @@ async fn the_daemon_end_to_end() {
     let iso = verify::isolation(&ctx).await.unwrap();
     assert_eq!(iso.extra_rows, 0);
 
-    // A GRANT through fence.write: relayed, then refreshed at least as fresh as its own write.
-    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('touch', 'container:acme/new', 'member', 'user:acme/ana')").await;
+    // A GRANT through rebac.write: relayed, then refreshed at least as fresh as its own write.
+    sql(&ctx, "set rebac.tenant = 'acme'; select rebac.write('touch', 'container:acme/new', 'member', 'user:acme/ana')").await;
     assert_eq!(relay::relay_once(&ctx).await.unwrap(), 1);
     let tok: Option<String> = ctx
         .pool
@@ -247,7 +247,7 @@ async fn the_daemon_end_to_end() {
         .await
         .unwrap()
         .query_one(
-            "select zedtoken from fence.refresh where tenant = 'acme' and principal = 'ana'",
+            "select zedtoken from rebac.refresh where tenant = 'acme' and principal = 'ana'",
             &[],
         )
         .await
@@ -261,7 +261,7 @@ async fn the_daemon_end_to_end() {
     );
 
     // A REVOCATION is in force at COMMIT, before the relay has run, and SpiceDB follows when it does.
-    sql(&ctx, "begin; set local fence.tenant = 'acme'; select fence.write('delete', 'container:acme/space', 'member', 'user:acme/ana'); commit").await;
+    sql(&ctx, "begin; set local rebac.tenant = 'acme'; select rebac.write('delete', 'container:acme/space', 'member', 'user:acme/ana'); commit").await;
     assert_eq!(
         set_of(&ctx, "acme", "ana").await,
         vec!["new"],
@@ -285,18 +285,18 @@ async fn the_daemon_end_to_end() {
     assert_eq!(d.extra_rows, 0, "{d:?}");
 
     // An arrow touch names no reader: LookupSubjects finds who can now see the file.
-    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('touch', 'container:acme/file2', 'parent', 'container:acme/other')").await;
+    sql(&ctx, "set rebac.tenant = 'acme'; select rebac.write('touch', 'container:acme/file2', 'parent', 'container:acme/other')").await;
     relay::relay_once(&ctx).await.unwrap();
     loops::refresh_pass(&ctx, 2).await.unwrap(); // the resource queue: LookupSubjects, enqueue bo
     loops::refresh_pass(&ctx, 2).await.unwrap(); // bo refreshed
     assert_eq!(set_of(&ctx, "acme", "bo").await, vec!["file2", "other"]);
 
     // SUBJECT SETS: a new member reads what the group was granted after delivery; removed, it is gone at commit.
-    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('touch', 'group:acme/eng', 'member', 'user:acme/eve')").await;
+    sql(&ctx, "set rebac.tenant = 'acme'; select rebac.write('touch', 'group:acme/eng', 'member', 'user:acme/eve')").await;
     relay::relay_once(&ctx).await.unwrap();
     loops::refresh_pass(&ctx, 2).await.unwrap();
     assert_eq!(set_of(&ctx, "acme", "eve").await, vec!["team"]);
-    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('delete', 'group:acme/eng', 'member', 'user:acme/dee')").await;
+    sql(&ctx, "set rebac.tenant = 'acme'; select rebac.write('delete', 'group:acme/eng', 'member', 'user:acme/dee')").await;
     assert!(
         set_of(&ctx, "acme", "dee").await.is_empty(),
         "a membership removed narrows at commit"
@@ -314,15 +314,15 @@ async fn the_daemon_end_to_end() {
     assert_eq!(set_of(&ctx, "acme", "eve").await, vec!["team"]);
 
     // The workspace admin revoked: narrowed through the edge at commit.
-    sql(&ctx, "set fence.tenant = 'acme'; select fence.write('delete', 'workspace:acme/w1', 'admin', 'user:acme/adm')").await;
+    sql(&ctx, "set rebac.tenant = 'acme'; select rebac.write('delete', 'workspace:acme/w1', 'admin', 'user:acme/adm')").await;
     assert!(set_of(&ctx, "acme", "adm").await.is_empty());
     relay::relay_once(&ctx).await.unwrap();
 
     // SPICEDB DOWN: a revocation is still in force at commit; the relay fails and marks nothing delivered.
-    let down = Ctx::connect(config("FENCE_IT_DB", "http://127.0.0.1:1", Mode::Live))
+    let down = Ctx::connect(config("REBAC_IT_DB", "http://127.0.0.1:1", Mode::Live))
         .await
         .unwrap();
-    sql(&down, "set fence.tenant = 'acme'; select fence.write('delete', 'container:acme/other', 'editor', 'user:acme/bo')").await;
+    sql(&down, "set rebac.tenant = 'acme'; select rebac.write('delete', 'container:acme/other', 'editor', 'user:acme/bo')").await;
     assert!(
         set_of(&down, "acme", "bo").await.is_empty(),
         "narrowed with SpiceDB unreachable"
@@ -334,7 +334,7 @@ async fn the_daemon_end_to_end() {
         .await
         .unwrap()
         .query_one(
-            "select count(*) from fence.outbox where synced_at is null",
+            "select count(*) from rebac.outbox where synced_at is null",
             &[],
         )
         .await
@@ -353,16 +353,16 @@ async fn the_daemon_end_to_end() {
     // A QUARANTINED row: SpiceDB refuses it on its own; the rest of the batch is delivered.
     sql(
         &ctx,
-        "set fence.tenant = 'acme';
-               select fence.write('touch', 'container:acme/fine', 'member', 'user:acme/cy');
-               select fence.write('touch', 'container:acme/bad', 'nosuchrelation', 'user:acme/cy')",
+        "set rebac.tenant = 'acme';
+               select rebac.write('touch', 'container:acme/fine', 'member', 'user:acme/cy');
+               select rebac.write('touch', 'container:acme/bad', 'nosuchrelation', 'user:acme/cy')",
     )
     .await;
     // An unknown relation is SpiceDB's FAILED_PRECONDITION: possibly a schema that lags a deploy, so while young the
     // row is DEFERRED (undelivered, no error, the rest delivered, the pass not counting it), and quarantined once settled.
     let counts = |c: deadpool_postgres::Object| async move {
         let r = c
-            .query_one("select count(*) filter (where error is not null), count(*) filter (where synced_at is null) from fence.outbox", &[])
+            .query_one("select count(*) filter (where error is not null), count(*) filter (where synced_at is null) from rebac.outbox", &[])
             .await.unwrap();
         (r.get::<_, i64>(0), r.get::<_, i64>(1))
     };
@@ -381,7 +381,7 @@ async fn the_daemon_end_to_end() {
         0,
         "a pass holding only a deferred row idles"
     );
-    sql(&ctx, "update fence.outbox set created_at = now() - interval '11 minutes' where synced_at is null").await;
+    sql(&ctx, "update rebac.outbox set created_at = now() - interval '11 minutes' where synced_at is null").await;
     relay::relay_once(&ctx).await.unwrap();
     assert_eq!(
         counts(ctx.pool.get().await.unwrap()).await,
@@ -390,7 +390,7 @@ async fn the_daemon_end_to_end() {
     );
 
     // SHADOW: a shadow daemon writes only readable_shadow, and the compare is clean.
-    let shadow = Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Shadow))
+    let shadow = Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Shadow))
         .await
         .unwrap();
     loops::refresh_pass(&ctx, 2).await.unwrap();
@@ -414,7 +414,7 @@ async fn the_daemon_end_to_end() {
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let hb = tokio::spawn(loops::heartbeat_loop(
         std::sync::Arc::new(
-            Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Live))
+            Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
                 .await
                 .unwrap(),
         ),
@@ -423,7 +423,7 @@ async fn the_daemon_end_to_end() {
     let mut fresh = false;
     for _ in 0..50 {
         let n: i64 = ctx.pool.get().await.unwrap()
-            .query_one("select count(*) from fence.watch_state where scope = '*' and heartbeat_at > now() - interval '3 seconds'", &[])
+            .query_one("select count(*) from rebac.watch_state where scope = '*' and heartbeat_at > now() - interval '3 seconds'", &[])
             .await.unwrap().get(0);
         if n == 1 {
             fresh = true;
@@ -436,26 +436,26 @@ async fn the_daemon_end_to_end() {
     hb.await.unwrap();
     {
         let c = ctx.pool.get().await.unwrap();
-        c.batch_execute("set fence.tenant = 'acme'").await.unwrap();
+        c.batch_execute("set rebac.tenant = 'acme'").await.unwrap();
         assert!(c
-            .query("select * from fence.readable_set('ana')", &[])
+            .query("select * from rebac.readable_set('ana')", &[])
             .await
             .is_ok());
-        c.batch_execute("update fence.watch_state set heartbeat_at = now() - interval '6 seconds'")
+        c.batch_execute("update rebac.watch_state set heartbeat_at = now() - interval '6 seconds'")
             .await
             .unwrap();
         let err = c
-            .query("select * from fence.readable_set('ana')", &[])
+            .query("select * from rebac.readable_set('ana')", &[])
             .await
             .unwrap_err();
-        assert_eq!(err.code().map(|c| c.code()), Some("FN503"));
+        assert_eq!(err.code().map(|c| c.code()), Some("RB503"));
     }
 
-    // WATCH, observe-only: a write made straight to SpiceDB (not through fence.write) is counted as external.
+    // WATCH, observe-only: a write made straight to SpiceDB (not through rebac.write) is counted as external.
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let w = tokio::spawn(loops::watch_loop(
         std::sync::Arc::new(
-            Ctx::connect(config("FENCE_IT_DB", &endpoint, Mode::Live))
+            Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
                 .await
                 .unwrap(),
         ),
@@ -482,7 +482,7 @@ async fn the_daemon_end_to_end() {
             .await
             .unwrap()
             .query_opt(
-                "select external_writes from fence.watch_state where scope = 'watch'",
+                "select external_writes from rebac.watch_state where scope = 'watch'",
                 &[],
             )
             .await

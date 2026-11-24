@@ -1,6 +1,6 @@
 //! A SpiceDB schema, parsed, and the CLOSURE of one permission: every relation whose tuples can change who holds it.
 //!
-//! pg_fence projects one permission (say `container#view`) into Postgres. Two facts depend on knowing exactly which
+//! pg_rebac projects one permission (say `container#view`) into Postgres. Two facts depend on knowing exactly which
 //! relations feed it: a delivered grant on one of them must refresh a reader, and a delete on one must narrow one.
 //! A relation missed here is a grant that never shows up or, worse, a revocation that never narrows. So the list is
 //! derived from the schema, never typed by hand, and the derivation REFUSES every shape it cannot narrow soundly.
@@ -93,7 +93,7 @@ impl Kind {
     }
 }
 
-/// One row of `fence.view_relation`.
+/// One row of `rebac.view_relation`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ViewRelation {
     pub resource_type: String,
@@ -103,7 +103,7 @@ pub struct ViewRelation {
     pub through: Option<String>,
 }
 
-/// Why the closure was refused. The schema is not wrong; pg_fence cannot narrow it soundly yet.
+/// Why the closure was refused. The schema is not wrong; pg_rebac cannot narrow it soundly yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     pub at: String,
@@ -131,7 +131,7 @@ impl fmt::Display for ClosureError {
                 write!(f, "the schema defines no permission or relation `{p}`")
             }
             ClosureError::Refused(r) => {
-                write!(f, "pg_fence cannot project this permission soundly:")?;
+                write!(f, "pg_rebac cannot project this permission soundly:")?;
                 for x in r {
                     write!(f, "\n  - {x}")?;
                 }

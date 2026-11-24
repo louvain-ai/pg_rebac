@@ -1,5 +1,5 @@
 -- Asserts that a fenced vector leg uses the HNSW index, at a narrow and a broad reader. Run after setup.sql.
-set fence.tenant = 'acme';
+set rebac.tenant = 'acme';
 set hnsw.iterative_scan = relaxed_order;
 create temp table plan_lines (reader text, line text);
 do $$
@@ -7,7 +7,7 @@ declare who text; r record;
 begin
   foreach who in array array['b005', 'b030', 'b100'] loop
     for r in execute format(
-      'explain (costs off) select id from passage where tenant = %L and container in (select * from fence.readable_set(%L)) '
+      'explain (costs off) select id from passage where tenant = %L and container in (select * from rebac.readable_set(%L)) '
       'order by embedding <=> (select embedding from passage where id = 7) limit 20', 'acme', who) loop
       insert into plan_lines values (who, r."QUERY PLAN");
     end loop;
