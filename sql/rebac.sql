@@ -1533,8 +1533,8 @@ begin
       using errcode = 'RB503', hint = 'rebac_watch_gap: the sweep the daemon forced, or POST /lookup, re-projects it';
   end if;
   if w.watch_required and grace > 0
-     and statement_timestamp() - coalesce(greatest(w.current_at, looked_up_at), '-infinity')
-         > grace * interval '1 millisecond' then
+     and coalesce(greatest(w.current_at, looked_up_at), '-infinity')
+         < statement_timestamp() - grace * interval '1 millisecond' then
     raise exception 'rebac: the Watch stream has not been current within % ms, and this principal was looked up before', grace
       using errcode = 'RB503',
             hint = 'rebac_watch: rebacd reconnects Watch; POST /lookup re-projects this principal now';
