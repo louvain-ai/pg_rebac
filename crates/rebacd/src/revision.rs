@@ -4,8 +4,8 @@
 //! A ZedToken is base64 of a `DecodedZedToken` protobuf whose `v1` (field 3) holds the datastore's revision string
 //! (field 1). Within one datastore revisions are ordered, and their strings take one of two shapes:
 //!
-//! - a DECIMAL (`1795557137917555507`, or `1795557137917555507.0000000001`): the in-memory datastore, MySQL,
-//!   CockroachDB and Spanner. Ordered as numbers.
+//! - a DECIMAL (`1795557137917555507`, or `1795557137917555507.0000000001`): the in-memory datastore, and the shape
+//!   MySQL, CockroachDB and Spanner write. Ordered as numbers.
 //! - base64 of a Postgres snapshot (`xmin` field 1, `relative_xmax` field 2, the in-progress list after): the Postgres
 //!   datastore. A snapshot S has seen every transaction that a head snapshot H had seen once `S.xmin >= H.xmax`: every
 //!   transaction below S.xmin has finished, and every one H had seen is below H.xmax. That is conservative (S may have

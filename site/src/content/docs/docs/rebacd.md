@@ -41,7 +41,7 @@ The SQL is installed separately, with `psql` or your migrations. No published im
   applied, a principal still reads while its own lookup, or the last time the stream was current, is within
   `watch_grace_ms` (5 s, in `rebac.config`); the rest are `RB503` until the stream is back or `POST /lookup`
   re-projects them. The heartbeat is liveness only and does not wait on the stream.
-  A schema change on the stream starts a closure re-check at once, and the stream reopens on the new closure's types.
+  A schema change on the stream starts a closure re-check at once, and the stream reopens.
   A reopened stream replays what happened while it was down, and reads stay closed until the whole replay is applied:
   the daemon reads SpiceDB's head revision when the stream opens (a fully consistent check, read-only) and counts the
   stream current only once its position reaches that revision. `watch_marker = true` waits for a marker
@@ -112,8 +112,9 @@ session advisory lock, `pg_try_advisory_lock(1919050596, 1)`, on a connection of
 closure check and the sweep. Every daemon relays the outbox (rows are claimed with `skip locked`, and one
 relationship's rows are delivered in order), refreshes principals (under leases) and serves `POST /lookup`.
 
-If the leader stops or its lock connection dies, another daemon takes the lock within `leader_retry_ms` and resumes
-Watch from the applied position. A deposed leader cannot commit one more Watch write: each runs in a transaction that
+If the leader stops, another daemon takes the lock within `leader_retry_ms` and resumes Watch from the applied
+position. If its host or network dies instead, Postgres releases the lock once the session's TCP keepalives give up,
+about 25 s (the lock session sets 10 s idle, 5 s interval, 3 probes). A deposed leader cannot commit one more Watch write: each runs in a transaction that
 first calls `rebac.assert_leader` with the lock connection's backend pid, which raises (`RB503`) unless that backend
 still holds the lock. A shadow daemon takes `(1919050596, 2)`, so it never displaces the live leader.
 

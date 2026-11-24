@@ -81,6 +81,12 @@ async fn try_acquire(ctx: &Ctx) -> anyhow::Result<Option<(tokio_postgres::Client
     tokio::spawn(async move {
         let _ = conn.await;
     });
+    // A dead host must not hold the lock for hours: the server gives up on the session after ~25 s of silence.
+    client
+        .batch_execute(
+            "set tcp_keepalives_idle = 10; set tcp_keepalives_interval = 5; set tcp_keepalives_count = 3",
+        )
+        .await?;
     let row = client
         .query_one(
             "select pg_try_advisory_lock($1, $2), pg_backend_pid()",

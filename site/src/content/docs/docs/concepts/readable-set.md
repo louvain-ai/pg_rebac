@@ -55,7 +55,7 @@ The test suite asserts this shape: the fenced vector leg uses the HNSW index wit
 |---|---|---|
 | `RB404` `rebac_not_projected` | This principal was never asked. | Call the daemon's `POST /lookup`, then retry. |
 | An empty set | Asked, and can read nothing. Believed for `empty_ttl_ms` (60,000 by default). | Nothing: it is the answer. |
-| `RB503` `rebac_unavailable` | The projection cannot be trusted now: the daemon is not live, the set is too old or of unknown age, it is over its cap, or SpiceDB could not be asked. | Fail the read. |
+| `RB503` `rebac_unavailable` | The projection cannot be trusted now: the daemon is not live, the set is too old or of unknown age, it is over its cap, or SpiceDB could not be asked. With hint `rebac_watch`, the Watch stream has not been current within `watch_grace_ms` and this set was looked up before. | Fail the read. For `rebac_watch`, `POST /lookup` re-projects the principal, then retry. |
 
 Two more codes complete the set. `RB400` is a missing tenant or principal; a read without one is a bug. `RB422` is
 a write the fence refuses, such as a reference that does not carry the tenant's prefix.

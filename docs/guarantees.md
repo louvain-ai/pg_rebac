@@ -88,7 +88,7 @@
    `rebac.set_principal` cannot choose the principal, and needs no access to the projection itself.
 
 10. **G10, a revocation made outside `rebac.write` is in force within Watch's delivery, or reads fail closed.** With
-    `watch = true` (the default, live mode), the daemon follows SpiceDB's Watch over every type in the closure and
+    `watch = true` (the default, live mode), the daemon follows SpiceDB's Watch over every type and
     applies each message in ONE transaction that also records the stream's position (`rebac.apply_watch`):
     - A DELETE of a closure relation that did not come through `rebac.write` is narrowed as G2 narrows a commit: the
       same function (`narrow_seqs`), the same lock order (the tenant exclusively for an arrow tuple or a grant to a
@@ -122,42 +122,38 @@
       requires the stream: it is liveness only. A connection that died silently is ended by HTTP/2 keepalive
       within 10 s, during which the stream still counts as current. The message is retried from the same position;
       nothing is half-applied.
-    - **On reconnect** the stream resumes from the position applied through, so a change made while it was down is
-      replayed and applied in order. Reads stay closed through the WHOLE replay. When the stream opens, the daemon
-      reads SpiceDB's head revision with a fully consistent CheckPermission (read-only; its answer is ignored), and
-      the stream counts as current only once a message's position is at or past that revision. Watch delivers in revision order, so by then every change committed before the stream reopened has
-      been applied. Revisions are compared as SpiceDB's datastores write them: as decimals (in memory, MySQL,
-      CockroachDB, Spanner) or as Postgres snapshots (a position covers the head once its `xmin` reaches the head's
-      `xmax`; the Postgres datastore reports its position through an idle checkpoint about every 5 s, so a reconnect
-      there stays closed up to that long). A position not reached within six times `deadline_ms` reopens the stream.
-      A token whose revision cannot be read keeps reads closed and says to set `watch_marker = true`: the daemon then
-      touches `<resource_type>:__rebac_watch_marker` on a direct relation (subject `<subject_type>:__rebac_watch_marker`,
-      no tenant prefix, so it grants nobody, and dropped before `rebac.apply_watch`) and waits for its revision.
+    - **On reconnect** the stream resumes from the position applied through, and reads stay closed until the whole
+      replay is applied. Before opening, the daemon reads SpiceDB's head revision with a fully consistent
+      CheckPermission whose answer it ignores; the stream counts as current once a delivered position reaches that
+      revision. Watch delivers in revision order, so by then everything committed before the reopen is applied. A
+      stored position already at the head (an idle store, which may send a resumed stream nothing at all) is current
+      at once. The daemon watches every type, so a revision past the position carries a change or a checkpoint the
+      stream delivers; on the Postgres datastore that is its idle checkpoint, about every 5 s, which bounds how long
+      such a reconnect stays closed. A position not reached within six times `deadline_ms` reopens the stream.
+      Revisions are compared as decimals (the in-memory datastore) or as Postgres snapshots (a position covers the
+      head once its `xmin` reaches the head's `xmax`); both shapes were read from SpiceDB 1.56's own tokens. MySQL,
+      CockroachDB and Spanner write decimal revisions too, but were not run. A revision the daemon cannot read keeps
+      reads closed and says to set `watch_marker = true`, which waits instead for a marker relationship it touches
+      (`<resource_type>:__rebac_watch_marker`, no tenant prefix, so it grants nobody, and dropped before
+      `rebac.apply_watch`).
     - **A position that cannot be resumed**: none stored (a first start, or the first start after upgrading from
       0.1, whose observe-only position applied nothing), one SpiceDB refuses (`INVALID_ARGUMENT`, `OUT_OF_RANGE`,
       `FAILED_PRECONDITION`, `NOT_FOUND`), or one whose last confirmation is older than `watch_resume_max_age_ms`
       (one hour). The age check exists because SpiceDB may resume from a revision past its garbage-collection window
       without an error and silently skip what it collected (observed with the in-memory datastore and a 2 s window).
-      The stream restarts from SpiceDB's head and records `gap_at`: every principal looked up before it is `RB503`
-      until it is re-projected, and the sweep is forced at once to do that (`POST /lookup` re-projects one sooner).
-      Every refresh already queued is re-queued fully consistent, so none is served from before the gap.
-      `rebacd backfill` and `rebacd run` store a position before they project anything, so the gap on a first start
-      precedes every lookup it makes.
+      The daemon reads the head revision, records `gap_at` there and resumes from it: every principal looked up
+      before is `RB503` until re-projected, the sweep is forced at once to do that (`POST /lookup` re-projects one
+      sooner), and every refresh already queued is re-queued fully consistent.
 
     **With several daemons** on one database, one leads: it holds a session advisory lock (`1919050596, 1`; a shadow
     daemon's is `1919050596, 2`) on a connection of its own, and only it runs Watch, the closure check and the sweep.
     Every daemon relays, refreshes and serves `POST /lookup`. Every Watch write runs in a transaction that first calls
     `rebac.assert_leader` with the lock connection's backend pid: it locks the applied position's row and raises
-    unless that backend still holds the lock, so a daemon whose lock connection died cannot commit another Watch write,
-    even before it notices. Another daemon takes the lock within `leader_retry_ms` (2 s) and resumes Watch from the
-    applied position (`leader_election = false` runs everything in every daemon, for a single daemon).
-    - **An idle store.** A store with nothing to replay may send a resumed stream nothing at all, not even the reply
-      that completes the open (SpiceDB's in-memory datastore sends no idle checkpoint). Its head revision is then the
-      stored position itself, so the stream is current at once. The daemon watches every type (`rebac.apply_watch`
-      skips relations outside the closure), so a head past the stored position always carries a change the stream
-      will deliver: there is no timing rule.
-    - **No position at all** (a first start): the daemon reads the head revision, records the gap at it
-      (`rebac.watch_restarted`) and resumes from there.
+    unless that backend still holds the lock, so a daemon whose lock connection died cannot commit another Watch
+    write, even before it notices. When the leader stops, another daemon takes the lock within `leader_retry_ms`
+    (2 s). When its host or network dies instead, Postgres releases the lock once its TCP keepalives give up on the
+    session; the lock session sets them to 10 s idle, 5 s interval and 3 probes, so about 25 s.
+    `leader_election = false` runs everything in every daemon, for a single daemon.
 
     A store that cannot serve Watch fails closed with Watch on, once the grace has passed: set
     `watch = false` there, and G7's sweep bound applies instead. In shadow mode Watch only counts, under its own position
