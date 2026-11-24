@@ -50,9 +50,9 @@ pub struct Config {
     pub refresh_idle_ms: u64,
     pub sweep_interval_ms: i64,
     pub sweep_settle_ms: i64,
-    /// Follow SpiceDB's Watch and apply changes made outside rebac.write (revocations narrowed at once). On, the
-    /// heartbeat also requires the stream: a store that cannot serve Watch fails every read closed, so turn it off
-    /// there, and such changes then wait for the sweep (G7).
+    /// Follow SpiceDB's Watch and apply changes made outside rebac.write (revocations narrowed at once). On, reads
+    /// also depend on the stream, per principal (rebac.watch_ok, `watch_grace_ms`): a store that cannot serve Watch
+    /// fails reads closed, so turn it off there, and such changes then wait for the sweep (G7).
     pub watch: bool,
     /// The oldest applied Watch position the daemon resumes from. Older, it restarts from head with a gap (sets looked
     /// up before fail closed until re-projected), because SpiceDB may have garbage-collected the changes in between

@@ -162,34 +162,30 @@ pub async fn sweep_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
     }
 }
 
-/// THE HEARTBEAT the staleness bound reads. Beaten only while SpiceDB answers, Postgres takes the write and (with
-/// Watch on) the Watch stream is connected and applying, so a daemon that is down, cut off from SpiceDB or behind on
-/// Watch stops beating and reads fail closed once the bound passes.
+/// THE HEARTBEAT the staleness bound reads. Beaten only while SpiceDB answers and Postgres takes the write, so a
+/// daemon that is down or cut off from SpiceDB stops beating and reads fail closed once the bound passes. It does NOT
+/// require the Watch stream: a dropped stream is judged per principal in SQL (rebac.watch_ok), so only the principals
+/// not looked up since the stream was last current fail closed, after `watch_grace_ms`.
 pub async fn heartbeat_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
     let every = Duration::from_millis(ctx.config.heartbeat_ms);
     let mut was_ok = true;
     while !*stop.borrow() {
-        // With Watch on (live), a beat also needs the stream connected and applying: a revocation made outside
-        // rebac.write is then in force within the stream's delivery, or reads fail closed.
-        let watch_ok = !(ctx.config.watch && ctx.config.mode == Mode::Live)
-            || ctx.watch_current.load(Ordering::SeqCst);
-        let ok = watch_ok
-            && match ctx
-                .spicedb
-                .read_schema(Duration::from_millis(ctx.config.heartbeat_ms.max(500) * 2))
-                .await
-            {
-                Ok(_) => match ctx.pool.get().await {
-                    Ok(c) => c.execute("select rebac.heartbeat('*')", &[]).await.is_ok(),
-                    Err(_) => false,
-                },
+        let ok = match ctx
+            .spicedb
+            .read_schema(Duration::from_millis(ctx.config.heartbeat_ms.max(500) * 2))
+            .await
+        {
+            Ok(_) => match ctx.pool.get().await {
+                Ok(c) => c.execute("select rebac.heartbeat('*')", &[]).await.is_ok(),
                 Err(_) => false,
-            };
+            },
+            Err(_) => false,
+        };
         if ok != was_ok {
             if ok {
                 tracing::info!("heartbeat resumed");
             } else {
-                tracing::warn!("heartbeat stopped: SpiceDB, Postgres or the Watch stream unavailable; reads fail closed past the bound");
+                tracing::warn!("heartbeat stopped: SpiceDB or Postgres unavailable; reads fail closed past the bound");
             }
             was_ok = ok;
         }

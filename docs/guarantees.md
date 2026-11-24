@@ -111,14 +111,21 @@
     row being gone.
     pg_rebac does not bound SpiceDB's delivery itself.) Otherwise reads fail closed:
     - **The stream is down, or a message cannot be applied** (a lock not taken within `narrow_lock_timeout_ms`): the
-      daemon stops beating the heartbeat, so every read is `RB503` within `max_staleness_ms` (5 s), plus the
-      heartbeat's own SpiceDB deadline when the connection died silently (HTTP/2 keepalive ends such a stream within
-      10 s). The message is retried from the same position; nothing is half-applied.
+      stream is not current, and reads are judged per principal (`rebac.watch_ok`, called by `rebac.checked`). A
+      set is exact as of the later of its own lookup and the last time the stream was current (`current_at`, moved
+      only by a caught-up stream, and dated to when the head was read). It is read while that is within
+      `watch_grace_ms` (5 s; 0 turns the check off), and is `RB503` (`rebac_watch`) after. So the principals looked
+      up since the stream was last current keep reading, everyone else fails closed after the grace, and
+      `POST /lookup` (fully consistent) re-projects any one at once. A refresh looked up `at_least_as_fresh` may be
+      served up to SpiceDB's revision quantization (5 s) older than its lookup time, so the bound for such a set is
+      the grace plus the quantization; `consistency = "fully_consistent"` makes it the grace. The heartbeat no longer
+      requires the stream: it is liveness only. A connection that died silently is ended by HTTP/2 keepalive
+      within 10 s, during which the stream still counts as current. The message is retried from the same position;
+      nothing is half-applied.
     - **On reconnect** the stream resumes from the position applied through, so a change made while it was down is
       replayed and applied in order. Reads stay closed through the WHOLE replay. When the stream opens, the daemon
       reads SpiceDB's head revision with a fully consistent CheckPermission (read-only; its answer is ignored), and
-      the stream counts as current, and the heartbeat resumes, only once a message's position is at or past that
-      revision. Watch delivers in revision order, so by then every change committed before the stream reopened has
+      the stream counts as current only once a message's position is at or past that revision. Watch delivers in revision order, so by then every change committed before the stream reopened has
       been applied. Revisions are compared as SpiceDB's datastores write them: as decimals (in memory, MySQL,
       CockroachDB, Spanner) or as Postgres snapshots (a position covers the head once its `xmin` reaches the head's
       `xmax`; the Postgres datastore reports its position through an idle checkpoint about every 5 s, so a reconnect
@@ -150,7 +157,9 @@
       skips relations outside the closure), so a head past the stored position always carries a change the stream
       will deliver: there is no timing rule.
     - **No position at all** (a first start): the daemon reads the head revision, records the gap at it
-      (`rebac.watch_restarted`) and resumes from there. A store that cannot serve Watch fails every read closed with Watch on: set
+      (`rebac.watch_restarted`) and resumes from there.
+
+    A store that cannot serve Watch fails closed with Watch on, once the grace has passed: set
     `watch = false` there, and G7's sweep bound applies instead. In shadow mode Watch only counts, under its own position
     (`watch_shadow`), so a shadow daemon never moves the live one's.
 

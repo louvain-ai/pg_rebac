@@ -368,12 +368,8 @@ begin
           using errcode = 'RB503',
                 hint = 'rebac_not_fresh: the daemon''s sweep re-projects everyone; POST /lookup re-projects one now';
       end if;
-      -- THE WATCH GAP: Watch restarted from head, so changes made outside rebac.write before that were never applied.
-      select w.gap_at into gap from rebac.watch_state w where w.scope = 'watch_applied';
-      if gap is not null and (st.looked_up_at is null or st.looked_up_at < gap) then
-        raise exception 'rebac: this principal was projected before Watch last lost its position'
-          using errcode = 'RB503', hint = 'rebac_watch_gap: the sweep the daemon forced, or POST /lookup, re-projects it';
-      end if;
+      -- WATCH: the gap (Watch restarted from head) and, with Watch required, the grace (rebac.watch_ok).
+      perform rebac.watch_ok(t, st.looked_up_at);
       if cl.changed_at > '-infinity' and (st.looked_up_at is null or st.looked_up_at < cl.changed_at) then
         raise exception 'rebac: this principal was projected before the schema''s closure last changed'
           using errcode = 'RB503', hint = 'rebac_closure: it is re-projected by the rebuild, the sweep or POST /lookup';

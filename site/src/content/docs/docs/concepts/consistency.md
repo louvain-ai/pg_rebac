@@ -111,7 +111,7 @@ an upgrade have no lookup time, and read as `RB503` until the sweep re-projects 
 | G6 | An unknown principal, a missing tenant, a daemon that is not live, a set too old or of unknown age, an unavailable lookup and an over-cap set each raise. None is an empty set, or a wider one. |
 | G7 | A set is read only while the SpiceDB lookup behind it began within `max_projection_age_ms`. Liveness is a separate bound. |
 | G8 | A change to what grants view in the live schema fails every read closed until every tenant is rebuilt under the new closure, and each principal looked up before it until it is re-projected. Noticed within `closure_check_ms` (10 s). |
-| G10 | A revocation made directly in SpiceDB leaves the projection within Watch's delivery plus one transaction (26 to 50 ms in one integration test, SpiceDB in memory on the same host), or every read fails closed: the stream down or a message unapplied stops the heartbeat (`RB503` within 5 s), and an unresumable position fails the principals looked up before it until re-projected. |
+| G10 | A revocation made directly in SpiceDB leaves the projection within Watch's delivery plus one transaction (26 to 50 ms in one integration test, SpiceDB in memory on the same host), or reads fail closed per principal: with the stream down or a message unapplied, a principal is `RB503` once both its own lookup and the last time the stream was current are older than `watch_grace_ms` (5 s), a reconnected stream counts as current only once it reaches the head revision read when it opened, and an unresumable position fails the principals looked up before it until re-projected. |
 
 ## Not guaranteed
 

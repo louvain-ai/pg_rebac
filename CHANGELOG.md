@@ -2,6 +2,12 @@
 
 ## 0.3.0
 
+- **A dropped Watch stream fails closed per principal, not everyone.** In 0.2.0 the heartbeat required the stream, so
+  one Watch hiccup made every read in every tenant `RB503` within 5 s. Now the heartbeat is liveness only, and
+  `rebac.checked` calls `rebac.watch_ok` (new): a set is read while its own lookup, or the last time the caught-up
+  stream was current (`watch_state.current_at`, new), is within `watch_grace_ms` (new `rebac.config` key, 5000).
+  Principals looked up since keep reading; `POST /lookup` re-projects any other at once. A live daemon records
+  whether Watch is on (`watch_state.watch_required`, `rebac.watch_required`).
 - **Reads stay closed through a Watch replay (fix).** In 0.2.0 a reconnected Watch stream counted as current, and
   the heartbeat resumed, after its first replayed message, so reads reopened while revocations made during the outage
   were still being applied. The daemon now reads SpiceDB's head revision when the stream opens (a fully consistent

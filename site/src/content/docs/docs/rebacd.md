@@ -38,7 +38,9 @@ The SQL is installed separately, with `psql` or your migrations. No published im
 - **Watch.** Applies SpiceDB's Watch stream: a revocation made outside `rebac.write` is
   narrowed in one transaction with the stream's position, under the same lock order as a commit, and everyone it
   affects is refreshed fully consistent; a grant queues a refresh. While the stream is down or a message cannot be
-  applied, the heartbeat stops, so reads fail closed.
+  applied, a principal still reads while its own lookup, or the last time the stream was current, is within
+  `watch_grace_ms` (5 s, in `rebac.config`); the rest are `RB503` until the stream is back or `POST /lookup`
+  re-projects them. The heartbeat is liveness only and does not wait on the stream.
   A schema change on the stream starts a closure re-check at once, and the stream reopens on the new closure's types.
   A reopened stream replays what happened while it was down, and reads stay closed until the whole replay is applied:
   the daemon reads SpiceDB's head revision when the stream opens (a fully consistent check, read-only) and counts the
@@ -101,6 +103,7 @@ disagree:
 | `empty_ttl_ms` | 60000 |
 | `max_containers_per_principal` | 100000 |
 | `narrow_lock_timeout_ms` | 5000 |
+| `watch_grace_ms` | 5000 (with Watch on: how long a set stays readable after both its lookup and the stream's last current moment) |
 
 ## Several daemons
 

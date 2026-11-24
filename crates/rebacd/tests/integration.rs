@@ -439,10 +439,13 @@ async fn the_daemon_end_to_end() {
     assert_eq!((d.extra_rows, d.missing_rows), (0, 0), "{d:?}");
 
     // HEARTBEAT: beaten while SpiceDB answers; reads are fresh, and back-dated past 5 s they fail closed. With Watch
-    // on, a beat also needs the stream: a daemon whose Watch is not running does not beat.
+    // on but its stream not current, the daemon still beats: the stream is judged PER PRINCIPAL (rebac.watch_ok), so
+    // a principal looked up before the stream was last current fails closed after watch_grace_ms, and one looked up
+    // since reads on.
     {
         let (stop_tx, stop) = tokio::sync::watch::channel(false);
         sql(&ctx, "delete from rebac.watch_state where scope = '*'").await;
+        sql(&ctx, "select rebac.watch_required(true); update rebac.watch_state set current_at = now() - interval '1 hour' where scope = 'watch_applied'").await;
         let hb = tokio::spawn(loops::heartbeat_loop(
             std::sync::Arc::new(
                 Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Live))
@@ -452,13 +455,8 @@ async fn the_daemon_end_to_end() {
             stop,
         ));
         tokio::time::sleep(Duration::from_millis(1_500)).await;
-        stop_tx.send(true).unwrap();
-        hb.await.unwrap();
-        let beats: i64 = ctx
-            .pool
-            .get()
-            .await
-            .unwrap()
+        let c = ctx.pool.get().await.unwrap();
+        let beats: i64 = c
             .query_one(
                 "select count(*) from rebac.watch_state where scope = '*'",
                 &[],
@@ -466,7 +464,29 @@ async fn the_daemon_end_to_end() {
             .await
             .unwrap()
             .get(0);
-        assert_eq!(beats, 0, "no beat while Watch is not applying");
+        assert_eq!(beats, 1, "the daemon beats with its Watch stream down");
+        sql(&ctx, "update rebac.principal_state set looked_up_at = now() - interval '1 minute' where tenant = 'acme' and principal = 'ana'").await;
+        let err = c
+            .batch_execute("set rebac.tenant = 'acme'; select * from rebac.readable_set('ana')")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code().map(|c| c.code()),
+            Some("RB503"),
+            "looked up before Watch was last current: closed"
+        );
+        project::refresh_one(&ctx, "acme", "ana", None, ctx.config.deadline())
+            .await
+            .unwrap();
+        assert!(
+            c.batch_execute("set rebac.tenant = 'acme'; select * from rebac.readable_set('ana')")
+                .await
+                .is_ok(),
+            "re-projected (POST /lookup does this): reads again, though Watch is still down"
+        );
+        stop_tx.send(true).unwrap();
+        hb.await.unwrap();
+        sql(&ctx, "select rebac.watch_required(false)").await;
     }
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let hb = tokio::spawn(loops::heartbeat_loop(
