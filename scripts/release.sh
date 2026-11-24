@@ -2,7 +2,7 @@
 # The whole release, in order, by the owner, after the release is approved:
 #   scripts/release.sh <version> [--dry-run]
 # Each publishing step asks first. --dry-run runs every step's dry-run form (no tag, no push, no publish).
-# Needs: git remote `origin` (push access), cargo logged in to crates.io, npm logged in as an owner of @louvain.
+# Needs: git remote `origin` (push access), cargo logged in to crates.io, npm logged in with publish rights to pg-rebac.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
