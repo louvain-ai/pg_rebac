@@ -9,7 +9,7 @@ SpiceDB schema and works out which relations can change that permission: the clo
 
 ## Supported
 
-The projected permission may be any union (`+`) of:
+The projected permission may be any union (`+`) or intersection (`&`) of:
 
 - **direct relations** (`member`, `editor`);
 - **a self-arrow** (`parent->view`), a container under another container;
@@ -17,6 +17,11 @@ The projected permission may be any union (`+`) of:
 - **subject sets one level deep** (`group#member`, where `group#member` holds plain object types);
 - **wildcards** (`user:*`) on a relation of the projected type. A wildcard grant refreshes
   every principal the tenant knows; its removal narrows every holder of the container at commit, like an arrow's.
+
+Both union and intersection are monotone: removing a tuple of any branch can only take access away. So a delete on
+any branch narrows at commit, even where another branch of a union still grants the container; that over-narrowing is
+restored by the refresh that follows, and it is the one direction a fence may err. A grant on any branch queues a
+refresh, and SpiceDB's lookup decides whether every branch of an intersection now holds.
 
 A schema of the shape the tests are built on:
 
@@ -63,18 +68,17 @@ until you accept it ([rebacd](/docs/rebacd/#the-schema-at-start)). `rebacd verif
 The rule underneath: narrowing on a delete is sound only if removing a tuple can never add access. Anything that
 breaks that, or that cannot be evaluated from tuples alone, is refused when the daemon starts, with every reason
 listed. A schema changed to such a construct while the daemon runs fails every read closed (`RB503`) until it is
-supported again ([schema changes while running](/docs/rebacd/#schema-changes-while-running)). A refusal is not a claim that the schema is wrong, only that pg_rebac cannot project it soundly yet.
+supported again ([schema changes while running](/docs/rebacd/#schema-changes-while-running)). A refusal is not a claim that the schema is wrong, only that pg_rebac cannot project it soundly.
 
 | Construct | Reason |
 |---|---|
-| Exclusion (`a - b`) | Not monotone: removing a tuple can grant. |
-| Intersection (`a & b`) | Not supported. |
-| Intersection arrow (`.all()`) | Not supported. |
+| Exclusion (`a - b`) | Not monotone: removing a tuple from `b` grants, and adding one revokes, which no delete-driven narrowing sees. |
+| Intersection arrow (`.all()`) | Not monotone: removing one of its tuples leaves fewer targets that must all hold, which can grant. |
 | Caveats (`with some_caveat`) | A caveated relationship cannot be evaluated locally. |
 | Expiring relationships (`with expiration`) | Cannot be evaluated locally. |
-| Wildcards (`user:*`) on a relation reached through an arrow, or inside a subject set | Not supported. |
+| Wildcards (`user:*`) on a relation reached through an arrow, or inside a subject set | Its removal would have to narrow every holder of every container under the other object; the narrowing reads one hop. |
 | Nested subject sets (`group#member` holding `group#member`) | A set's members must be plain object types. |
 | A subject set naming a permission | It must name a relation of a defined type. |
-| An arrow more than one hop from the projected type | Not supported. |
+| An arrow more than one hop from the projected type | Removing its far tuple would have to narrow every container under it; `rebac.edge` mirrors one hop. |
 
 Other permissions on the same type, such as `edit`, are not part of the closure and are not checked.

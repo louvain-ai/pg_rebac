@@ -850,6 +850,70 @@ async fn the_daemon_end_to_end() {
         closure::Recheck::Unchanged
     );
 
+    // AN INTERSECTION is projected, and a revocation of either branch is in force at commit: `& cleared` on top of the
+    // union. The rebuild projects the intersection (ana is not cleared, so vdoc goes); a grant of `cleared` brings it
+    // back; revoking `cleared` through rebac.write narrows at commit, before any relay, and no refresh restores it.
+    let with_and = with_viewer
+        .replace(
+            "relation viewer: user\n",
+            "relation viewer: user\n  relation cleared: user\n",
+        )
+        .replace(
+            "permission view = member + editor + viewer + workspace->admin + parent->view",
+            "permission view = (member + editor + viewer + workspace->admin + parent->view) & cleared",
+        );
+    assert!(with_and.contains("& cleared"));
+    s.write_schema(&with_and, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        closure::recheck(&ctx).await.unwrap(),
+        closure::Recheck::Rebuilt
+    );
+    assert!(
+        !set_of(&ctx, "acme", "ana")
+            .await
+            .contains(&"vdoc".to_string()),
+        "an intersection: viewer alone no longer grants view"
+    );
+    s.write(
+        &[op(true, "container:acme/vdoc", "cleared", "user:acme/ana")],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    project::refresh_one(&ctx, "acme", "ana", None, ctx.config.deadline())
+        .await
+        .unwrap();
+    assert!(
+        set_of(&ctx, "acme", "ana")
+            .await
+            .contains(&"vdoc".to_string()),
+        "both branches hold: projected"
+    );
+    sql(&ctx, "begin; set local rebac.tenant = 'acme'; select rebac.write('delete', 'container:acme/vdoc', 'cleared', 'user:acme/ana'); commit").await;
+    assert!(
+        !set_of(&ctx, "acme", "ana")
+            .await
+            .contains(&"vdoc".to_string()),
+        "revoking one branch of an intersection is in force at commit"
+    );
+    relay::relay_once(&ctx).await.unwrap();
+    while loops::refresh_pass(&ctx, 4).await.unwrap() > 0 {}
+    assert!(
+        !set_of(&ctx, "acme", "ana")
+            .await
+            .contains(&"vdoc".to_string()),
+        "and no refresh restores it"
+    );
+    s.write_schema(&with_viewer, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        closure::recheck(&ctx).await.unwrap(),
+        closure::Recheck::Rebuilt
+    );
+
     // An unsupported schema (exclusion: removing a tuple can grant) fails every read closed until it is fixed.
     let excluding = with_viewer
         .replace(

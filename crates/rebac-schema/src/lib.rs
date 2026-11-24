@@ -5,9 +5,10 @@
 //! A relation missed here is a grant that never shows up or, worse, a revocation that never narrows. So the list is
 //! derived from the schema, never typed by hand, and the derivation REFUSES every shape it cannot narrow soundly.
 //!
-//! The shape slice 1 accepts, for the projected type `R` and permission `p`:
+//! The shapes it accepts, for the projected type `R` and permission `p`:
 //!
-//! - `p` is a union (`+`) of relations and permissions on `R`;
+//! - `p` is a union (`+`) or an intersection (`&`) of relations and permissions on `R`: both are monotone, so a
+//!   delete on any branch narrows (over-narrowing what another branch still grants, which a refresh restores);
 //! - a relation on `R` whose allowed types are plain object types: `direct`;
 //! - an arrow `t->p` where `t` is a relation on `R` pointing back at `R`: a self-arrow (a file under its space);
 //! - an arrow `t->q` where `t` points at another type `W` and `q` is a union of plain relations on `W`: the arrow is
@@ -18,7 +19,7 @@
 //! - a direct or via relation may also accept a SUBJECT SET `T#r` (`group#member`), where `r` is a plain relation on
 //!   `T` whose allowed types are object types: `r` on `T` is kind `set` (its tuples are memberships).
 //!
-//! Refused, each with its reason: exclusion (`-`, removing a tuple can grant), intersection (`&`, `.all()`), caveats,
+//! Refused, each with its reason: exclusion (`-`, adding a tuple can revoke), `.all()` (removing a tuple can grant), caveats,
 //! expiring relationships, a wildcard on a relation reached through an arrow, a subject set that is itself a permission or holds further subject
 //! sets (nested groups), and an arrow more than one hop away.
 
@@ -309,19 +310,24 @@ impl Walk<'_> {
                     self.expr(ty, name, x, through);
                 }
             }
-            Expr::Intersect(_) => {
-                self.refuse(at, "an intersection (&) is not supported in slice 1")
+            // An intersection is monotone, as a union is: removing a tuple of any branch can only narrow, so every
+            // branch's relations narrow on a delete and refresh on a grant. Narrowing a container that another branch
+            // still grants is over-narrowing, which the refresh that follows restores (and the fence may err that way).
+            Expr::Intersect(xs) => {
+                for x in xs {
+                    self.expr(ty, name, x, through);
+                }
             }
             Expr::Exclude(_, _) => self.refuse(
                 at,
-                "an exclusion (-) is not monotone: removing a tuple can grant",
+                "an exclusion (-) is refused: adding a tuple to its subtracted side revokes, and only removals narrow",
             ),
             Expr::Arrow {
                 kind: ArrowKind::All,
                 ..
             } => self.refuse(
                 at,
-                "an intersection arrow (.all) is not supported in slice 1",
+                "an intersection arrow (.all) is refused: removing one of its tuples can grant (fewer targets must all hold)",
             ),
             Expr::Arrow {
                 tupleset,
@@ -343,7 +349,7 @@ impl Walk<'_> {
         if ty != self.root || through.is_some() {
             self.refuse(
                 at,
-                "an arrow more than one hop from the projected type is not supported in slice 1",
+                "an arrow more than one hop from the projected type is refused: removing its far tuple would have to narrow every container under it, and the edge mirror holds one hop",
             );
             return;
         }
