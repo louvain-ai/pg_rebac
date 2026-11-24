@@ -13,6 +13,10 @@
   `watch_resume_max_age_ms` (new, one hour): the stream restarts from head, sets looked up before it are `RB503`
   until re-projected, and the sweep is forced. **Upgrading from 0.1 records one gap on the first start** (0.1's
   position applied nothing): reads are `RB503` until the forced sweep re-projects each principal.
+- **`rebac.fenced_ids(p, tbl, q, k, …)`: breadth-routed nearest neighbours.** It counts the reader's candidate rows
+  up to `exact_below_rows` (new setting, 5,000) and sorts them exactly below it, or runs the fenced HNSW scan with
+  `relaxed_order` above it, so a narrow reader no longer trades recall by accident. Measured crossover: 4,000 to
+  5,000 candidate rows.
 - **SQL:** `rebac.outbox.origin` (`write` or `watch`), `rebac.watch_state.gap_at`, `rebac.apply_watch`,
   `rebac.watch_restarted`, `rebac.watch_alive`, `rebac.mirror`, `rebac.queue_refreshes`. A refresh queued fully
   consistent (`zedtoken = ''`) stays so when a later enqueue carries a token. The sweep no longer re-sends a

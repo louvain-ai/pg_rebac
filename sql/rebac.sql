@@ -38,7 +38,8 @@ insert into rebac.config (key, value) values
                                       -- (unknown), fails closed (RB503); 0 off. Must exceed the daemon's sweep interval
   ('empty_ttl_ms', '60000'),          -- how long "can read nothing" is believed
   ('max_containers_per_principal', '100000'),
-  ('narrow_lock_timeout_ms', '5000')  -- how long narrowing waits for a principal's lock before failing the commit
+  ('narrow_lock_timeout_ms', '5000'),  -- how long narrowing waits for a principal's lock before failing the commit
+  ('exact_below_rows', '5000')       -- rebac.fenced_ids sorts exactly below this many candidate rows, else fenced ANN
 on conflict (key) do nothing;
 
 create or replace function rebac.setting(k text) returns text
@@ -422,6 +423,72 @@ create or replace function rebac.version(p text) returns bigint
 language sql stable as $$
   select coalesce((select version from rebac.principal_state where tenant = rebac.tenant() and principal = p), 0)
 $$;
+
+-- -------------------------------------------------------------------------------------------------------------------
+-- Breadth-routed nearest neighbours.
+-- -------------------------------------------------------------------------------------------------------------------
+
+-- THE k NEAREST ROWS A PRINCIPAL MAY READ, by the path that is right for its breadth. A fenced HNSW scan of a narrow
+-- reader walks to pgvector's scan limit and returns too few rows at low recall; an exact sort of a broad reader's rows
+-- is slow. So: count the reader's candidate rows up to `exact_below_rows` (one index range scan, stopped there), and
+-- below it sort them exactly (complete, recall 1.0); above it run the fenced HNSW scan with
+-- hnsw.iterative_scan = relaxed_order (all k rows, approximate) and order the k it returns. `path` says which ran.
+--   select id from rebac.fenced_ids('priya', 'passage', $1::vector, 20);
+-- Fenced like every read (rebac.readable_set: RB400, RB404, RB503 as usual). Needs pgvector 0.8 or later for the ANN
+-- path, and an index on `container_col` (with `tenant_col` first when given) for the count. `tenant_col` adds
+-- `tenant_col = rebac.tenant()`, for a table holding several tenants' rows. `op` is a pgvector distance operator.
+-- The threshold is rebac.config's `exact_below_rows` (5,000), or `exact_below` when given. Measured through this
+-- function on the planner study's data (500,000 passages, 128 dimensions, k = 20, HNSW defaults, p50 of 20 queries):
+-- exact took 4.9 / 8.3 / 11.9 / 14.2 / 20.9 ms at 500 / 2,000 / 4,000 / 5,000 / 10,000 candidate rows, ANN 85.7 /
+-- 25.1 / 12.3 / 10.8 / 6.1 ms at recall 0.60 / 0.80 / 0.91 / 0.92 / 0.89. The crossover is 4,000 to 5,000 rows;
+-- the 768-dimension study (docs/planner.md) crosses at about 5,000 too. Re-measure on your own data.
+create or replace function rebac.fenced_ids(p text, tbl regclass, q anyelement, k integer,
+                                            id_col text default 'id', container_col text default 'container',
+                                            embedding_col text default 'embedding', tenant_col text default null,
+                                            op text default '<=>', exact_below integer default null)
+returns table (id text, distance float8, path text)
+language plpgsql volatile
+set hnsw.iterative_scan = 'relaxed_order' as $$
+declare
+  thr integer := coalesce(exact_below, coalesce(rebac.setting('exact_below_rows'), '5000')::integer);
+  arr text[];
+  tenant_filter text := '';
+  n bigint;
+begin
+  if op not in ('<=>', '<->', '<#>', '<+>') then
+    raise exception 'rebac.fenced_ids: op is a pgvector distance operator (<=>, <->, <#>, <+>)' using errcode = 'RB422';
+  end if;
+  if k is null or k < 1 then return; end if;
+  if tenant_col is not null then
+    tenant_filter := format('%I = rebac.tenant() and ', tenant_col);
+  end if;
+  -- The set, checked (it raises rather than return empty by accident).
+  arr := array(select * from rebac.readable_set(p));
+  if cardinality(arr) = 0 then return; end if;
+  execute format('select count(*) from (select 1 from %s where %s%I = any($1) limit $2) x',
+                 tbl, tenant_filter, container_col)
+    into n using arr, thr::bigint + 1;
+  if n <= thr then
+    -- Materialised, so the planner cannot hand the sort to the HNSW index (which would make it approximate again).
+    return query execute format(
+      'with c as materialized (select %I::text as i, (%I %s $1)::float8 as d from %s where %s%I = any($2))
+       select c.i, c.d, ''exact''::text from c order by c.d limit $3',
+      id_col, embedding_col, op, tbl, tenant_filter, container_col)
+      using q, arr, k;
+    return;
+  end if;
+  if coalesce((select string_to_array(extversion, '.')::int[] from pg_extension where extname = 'vector'),
+              '{0}') < '{0,8}' then
+    raise exception 'rebac.fenced_ids: the ANN path needs pgvector 0.8 or later (hnsw.iterative_scan)'
+      using errcode = 'RB422', hint = 'without iterative scans a fenced HNSW scan silently returns fewer than k rows';
+  end if;
+  -- relaxed_order returns the k rows slightly out of order: they are put back in order here.
+  return query execute format(
+    'select s.i, s.d, ''ann''::text from (select %I::text as i, (%I %s $1)::float8 as d from %s
+       where %s%I in (select * from rebac.readable_set($2)) order by %I %s $1 limit $3) s order by s.d',
+    id_col, embedding_col, op, tbl, tenant_filter, container_col, embedding_col, op)
+    using q, p, k;
+end $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
 -- Projection writers (the daemon's entry points). Each takes the tenant explicitly; none clears another tenant.
