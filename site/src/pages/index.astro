@@ -141,7 +141,12 @@ const description =
    handbook  | Expenses
 
 <span class="c">4. A principal nobody has asked about is an error (RB404), never an empty set:</span>
-   ERROR:  rebac: this principal has not been projected</code></pre>
+   mallory → RB404 "this principal has not been projected" (an error, never an empty set)
+
+<span class="c">You just saw one vector search return different rows per person, fenced inside the query,
+and a revocation in force at commit. Stop it and forget everything:</span>
+  curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v
+<span class="c">Docs:</span> https://pgrebac.com/docs/getting-started/</code></pre>
         <h3 class="next-title">Next steps</h3>
         <ul class="next">
           <li><strong>Install into your own Postgres 14+:</strong> <code>psql -v ON_ERROR_STOP=1 -f sql/rebac.sql</code>, no extension needed, hosted or not.</li>

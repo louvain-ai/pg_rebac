@@ -85,7 +85,12 @@ hand, so it needs no model). What you see, abridged:
  handbook  | Expenses
 
 4. A principal nobody has asked about is an error (RB404), never an empty set:
-ERROR:  rebac: this principal has not been projected
+   mallory → RB404 "this principal has not been projected" (an error, never an empty set)
+
+You just saw one vector search return different rows per person, fenced inside the query, and a revocation
+in force at commit. Stop it and forget everything:
+  curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v
+Docs: https://pgrebac.com/docs/getting-started/
 ```
 
 The first run pulls four images; after that a run takes about six seconds. Nothing listens on your host, and

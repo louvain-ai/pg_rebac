@@ -226,7 +226,18 @@ configs:
 
       \echo '4. A principal nobody has asked about is an error (RB404), never an empty set:'
       \echo
-      \set ON_ERROR_STOP off
-      \set VERBOSITY terse
-      select * from rebac.readable_set('mallory');
-      \set ON_ERROR_STOP on
+      -- The demo catches the error to print it as one line; an application sees it raised (SQLSTATE RB404).
+      do $$$$
+      begin
+        perform * from rebac.readable_set('mallory');
+        perform set_config('demo.mallory', 'returned a set (unexpected)', false);
+      exception when sqlstate 'RB404' then
+        perform set_config('demo.mallory', sqlstate || ' "' || replace(sqlerrm, 'rebac: ', '') || '"', false);
+      end $$$$;
+      select current_setting('demo.mallory') as mallory \gset
+      \echo '   mallory →' :mallory '(an error, never an empty set)'
+      \echo
+      \echo 'You just saw one vector search return different rows per person, fenced inside the query, and a revocation'
+      \echo 'in force at commit. Stop it and forget everything:'
+      \echo '  curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v'
+      \echo 'Docs: https://pgrebac.com/docs/getting-started/'
