@@ -279,6 +279,7 @@ language sql stable as $$
     and rebac.obj_type(subj) = rebac.setting('subject_type')
     and rebac.strip(t, rebac.obj_id(subj)) is not null
     and strpos(subj, '#') = 0
+    and rebac.obj_id(subj) <> '*'   -- a wildcard names nobody: its removal narrows every holder instead
 $$;
 
 -- THE LOCK ORDER, for every writer of the projection: the TENANT first, then the PRINCIPAL.
@@ -522,11 +523,11 @@ language sql stable as $$
       and e.parent = rebac.obj_type(d.resource) || ':' || rebac.strip(t, rebac.obj_id(d.resource))
     where d.subject in (select s from subj)
     union
-    -- an arrow tuple, or a grant to a subject set, being removed holds its container for everyone until delivered
+    -- an arrow tuple, a grant to a subject set or a wildcard, being removed holds its container for everyone until delivered
     select rebac.strip(t, rebac.obj_id(d.resource))
     from deleted d join rebac.view_relation v
       on v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
-     and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
+     and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(d.subject, '#') > 0 or rebac.obj_id(d.subject) = '*')))
     union
     -- a membership of a subject set: whatever the set was granted
     select g.container
@@ -692,7 +693,7 @@ begin
       using errcode = 'RB422';
   end if;
   if rebac.strip(t, rebac.obj_id(resource)) is null
-     or rebac.strip(t, split_part(rebac.obj_id(subject), '#', 1)) is null then
+     or (rebac.strip(t, split_part(rebac.obj_id(subject), '#', 1)) is null and rebac.obj_id(subject) <> '*') then
     raise exception 'rebac.write: a reference does not carry this tenant''s prefix' using errcode = 'RB422';
   end if;
   -- A revocation is narrowed at commit by deleting rows that a refresh may have committed a moment earlier. Under
@@ -742,7 +743,7 @@ begin
   create temp table if not exists rebac_narrow_holders (tenant text, container text) on commit drop;
   truncate rebac_narrow_holders;
 
-  -- An arrow, or a grant to a subject set, removed: everyone who holds the container loses it. Who holds it is read
+  -- An arrow, a grant to a subject set or a wildcard, removed: everyone who holds the container loses it. Who holds it is read
   -- only AFTER the tenant is held exclusively (below).
   insert into rebac_narrow_holders (tenant, container)
   with net as (
@@ -753,7 +754,7 @@ begin
   select distinct d.tenant, rebac.strip(d.tenant, rebac.obj_id(d.resource))
   from net d join rebac.view_relation v
     on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
-   and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
+   and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(d.subject, '#') > 0 or rebac.obj_id(d.subject) = '*')))
   where d.op = 'delete' and v.resource_type = root;
 
   perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
@@ -1199,7 +1200,7 @@ begin
   select distinct o.tenant, o.resource, token, now(), 1
   from rebac.outbox o join rebac.view_relation v
     on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation
-   and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(o.subject, '#') > 0))
+   and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(o.subject, '#') > 0 or rebac.obj_id(o.subject) = '*')))
   where o.seq = any(delivered)
   on conflict (tenant, resource) do update
     set zedtoken = case when rebac.refresh_resource.zedtoken = '' or excluded.zedtoken = '' then ''
@@ -1207,6 +1208,18 @@ begin
         due_at = least(rebac.refresh_resource.due_at, now()),
         generation = rebac.refresh_resource.generation + 1;
   get diagnostics n = row_count;
+  queued := queued + n;
+
+  -- A wildcard GRANTED (container#member@user:*) reaches every principal, and LookupSubjects names none of them: refresh
+  -- everyone the tenant knows. (Removed, it narrowed every holder; the resource queued above restores who keeps it.)
+  select count(*) into n from (
+    select distinct o.tenant, x.principal
+    from rebac.outbox o join rebac.view_relation v
+      on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation and v.kind = 'direct'
+    cross join lateral (select ps.principal from rebac.principal_state ps where ps.tenant = o.tenant and ps.state <> 'retired'
+                        union select su.principal from rebac.subject su where su.tenant = o.tenant) x
+    where o.seq = any(delivered) and o.op = 'touch' and rebac.obj_id(o.subject) = '*'
+  ) w, lateral (select rebac.enqueue_refresh(w.tenant, w.principal, 1::smallint, token)) y;
   return queued + n;
 end $$;
 
@@ -1360,7 +1373,8 @@ begin
     foreach t in array tenants loop
       -- A tuple whose ids carry another tenant's prefix maps to nobody (G5).
       continue when rebac.strip(t, rebac.obj_id(resources[i])) is null
-                 or rebac.strip(t, split_part(rebac.obj_id(subjects[i]), '#', 1)) is null;
+                 or (rebac.strip(t, split_part(rebac.obj_id(subjects[i]), '#', 1)) is null
+                     and rebac.obj_id(subjects[i]) <> '*');
       insert into rebac.outbox (tenant, op, resource, relation, subject, synced_at, zedtoken, requeued_at, origin)
       values (t, ops[i], resources[i], relations[i], subjects[i], now(), token, now(), 'watch')
       returning seq into new_seq;

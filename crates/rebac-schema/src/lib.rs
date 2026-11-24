@@ -13,11 +13,13 @@
 //! - an arrow `t->q` where `t` points at another type `W` and `q` is a union of plain relations on `W`: the arrow is
 //!   kind `arrow`, and each relation on `W` it reaches is kind `via`, reached `through` `t`.
 //!
+//! - a direct relation may also accept a WILDCARD (`user:*`): a grant to every subject of that type, whose removal
+//!   narrows every holder of the container;
 //! - a direct or via relation may also accept a SUBJECT SET `T#r` (`group#member`), where `r` is a plain relation on
 //!   `T` whose allowed types are object types: `r` on `T` is kind `set` (its tuples are memberships).
 //!
 //! Refused, each with its reason: exclusion (`-`, removing a tuple can grant), intersection (`&`, `.all()`), caveats,
-//! expiring relationships, wildcards (`user:*`), a subject set that is itself a permission or holds further subject
+//! expiring relationships, a wildcard on a relation reached through an arrow, a subject set that is itself a permission or holds further subject
 //! sets (nested groups), and an arrow more than one hop away.
 
 mod parse;
@@ -238,10 +240,13 @@ impl Walk<'_> {
                     "an expiring relationship cannot be evaluated locally",
                 );
             }
-            if a.wildcard {
+            // A wildcard (`user:*`) on the projected type itself is a grant to everyone: its removal narrows every
+            // holder of the container, as an arrow's does. Reached through an arrow, it would have to narrow every
+            // holder of every container under the other object, which is not built.
+            if a.wildcard && ty != self.root {
                 self.refuse(
                     at.clone(),
-                    "a wildcard grant cannot be narrowed per principal",
+                    "a wildcard is supported only on a relation of the projected type, not one reached through an arrow",
                 );
             }
             if let Some(r) = &a.relation {

@@ -124,8 +124,14 @@ fn refuses_caveats_expiry_wildcards_and_subject_sets() {
         "expiring",
     );
     refused(
-        "definition user {} definition doc { relation reader: user:* permission view = reader }",
-        "wildcard",
+        "definition user {} definition w { relation admin: user:* } \
+         definition doc { relation w: w permission view = w->admin }",
+        "not one reached through an arrow",
+    );
+    refused(
+        "definition user {} definition group { relation member: user:* } \
+         definition doc { relation reader: group#member permission view = reader }",
+        "no nested sets, wildcards or caveats",
     );
     refused(
         "definition user {} definition group { relation member: user | group#member } \
@@ -192,4 +198,22 @@ fn accepts_one_level_of_subject_sets() {
     assert!(got.contains(&rel("group", "member", Kind::Set, None, None)));
     assert!(got.contains(&rel("doc", "reader", Kind::Direct, None, None)));
     assert_eq!(got.len(), 4);
+}
+
+#[test]
+fn accepts_a_wildcard_on_the_projected_type() {
+    let s = parse(
+        "definition user {} definition doc { relation reader: user | user:* relation owner: user \
+         permission view = reader + owner }",
+    )
+    .unwrap();
+    let mut got = closure(&s, "doc", "view").unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            rel("doc", "owner", Kind::Direct, None, None),
+            rel("doc", "reader", Kind::Direct, None, None)
+        ]
+    );
 }

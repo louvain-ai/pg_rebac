@@ -11,12 +11,13 @@
    daemon is up. That holds exactly for:
    - direct relations;
    - the relations reached through an arrow (`workspace->admin`);
-   - memberships of subject sets.
+   - memberships of subject sets;
+   - wildcard grants on the projected type (`container#member@user:*`).
    If a lock cannot be taken within `narrow_lock_timeout_ms`, the COMMIT fails; it never commits an unnarrowed
    revocation.
 
-   Two kinds of removal narrow EVERYONE who holds a container: an arrow tuple (a file leaving its space) and a grant to
-   a subject set. They name no principal, so the trigger holds the TENANT exclusively before it reads who the holders
+   Three kinds of removal narrow EVERYONE who holds a container: an arrow tuple (a file leaving its space), a grant to
+   a subject set and a wildcard grant. They name no principal, so the trigger holds the TENANT exclusively before it reads who the holders
    are. Every projection writer (a refresh, a lazy first read, a retirement) holds its tenant shared, then its
    principal, from before it asks SpiceDB until it commits. So a refresh in flight commits before the holders are read
    (and its row is narrowed), and a refresh that starts later waits for the commit (and subtracts the revocation as
@@ -43,7 +44,9 @@
 4. **G4, at least as fresh.** A refresh queued by a delivery is looked up at `at_least_as_fresh` the token SpiceDB
    wrote that delivery at. A first read, and anything with no token, is looked up fully consistent.
 5. **G5, tenant isolation.** Every key carries the tenant. A tuple whose ids carry another tenant's prefix is refused
-   by `rebac.write`, maps to nobody, and is dropped from a lookup.
+   by `rebac.write`, maps to nobody, and is dropped from a lookup. A wildcard subject (`user:*`) carries no tenant:
+   SpiceDB grants it to every `user`, in every tenant, but the resource still carries its tenant, so only that
+   tenant's principals can project it (a lookup drops another tenant's ids).
 6. **G6, fail closed.**
    - An unknown principal is `RB404`.
    - A missing tenant is `RB400`.

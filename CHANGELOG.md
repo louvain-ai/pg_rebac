@@ -17,6 +17,9 @@
   up to `exact_below_rows` (new setting, 5,000) and sorts them exactly below it, or runs the fenced HNSW scan with
   `relaxed_order` above it, so a narrow reader no longer trades recall by accident. Measured crossover: 4,000 to
   5,000 candidate rows.
+- **Wildcards on the projected type** (`relation member: user | user:*`). A wildcard grant refreshes every principal
+  the tenant knows; its removal narrows every holder of the container at commit (and from Watch), like an arrow's. A
+  wildcard on a relation reached through an arrow, or inside a subject set, is still refused.
 - **SQL:** `rebac.outbox.origin` (`write` or `watch`), `rebac.watch_state.gap_at`, `rebac.apply_watch`,
   `rebac.watch_restarted`, `rebac.watch_alive`, `rebac.mirror`, `rebac.queue_refreshes`. A refresh queued fully
   consistent (`zedtoken = ''`) stays so when a later enqueue carries a token. The sweep no longer re-sends a

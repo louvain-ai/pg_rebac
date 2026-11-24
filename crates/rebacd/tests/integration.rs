@@ -22,7 +22,7 @@ definition group {
 definition container {
   relation workspace: workspace
   relation parent: container
-  relation member: user | group#member
+  relation member: user | group#member | user:*
   relation editor: user
   permission view = member + editor + workspace->admin + parent->view
 }
@@ -736,6 +736,52 @@ async fn the_daemon_end_to_end() {
         .get(0);
     assert!(watched, "Watch records when it last heard from SpiceDB");
     drop(c);
+
+    // WILDCARDS: a grant to user:* reaches every projected principal; its revocation is in force at commit for all.
+    sql(
+        &ctx,
+        "set rebac.tenant = 'acme'; select rebac.write('touch', 'container:acme/public', 'member', 'user:*')",
+    )
+    .await;
+    relay::relay_once(&ctx).await.unwrap();
+    while loops::refresh_pass(&ctx, 4).await.unwrap() > 0 {}
+    assert!(
+        set_of(&ctx, "acme", "adm")
+            .await
+            .contains(&"public".to_string()),
+        "a wildcard grant reaches everyone"
+    );
+    assert!(set_of(&ctx, "acme", "dee")
+        .await
+        .contains(&"public".to_string()));
+    assert!(
+        !set_of(&ctx, "globex", "ana")
+            .await
+            .contains(&"public".to_string()),
+        "within its tenant only"
+    );
+    sql(
+        &ctx,
+        "set rebac.tenant = 'acme'; select rebac.write('delete', 'container:acme/public', 'member', 'user:*')",
+    )
+    .await;
+    assert!(
+        !set_of(&ctx, "acme", "adm")
+            .await
+            .contains(&"public".to_string()),
+        "removed at commit"
+    );
+    assert!(!set_of(&ctx, "acme", "dee")
+        .await
+        .contains(&"public".to_string()));
+    relay::relay_once(&ctx).await.unwrap();
+    while loops::refresh_pass(&ctx, 4).await.unwrap() > 0 {}
+    assert!(
+        !set_of(&ctx, "acme", "adm")
+            .await
+            .contains(&"public".to_string()),
+        "and stays removed"
+    );
 
     // LIVE SCHEMA CHANGES. A new relation that grants view: the closure is re-derived, every tenant rebuilt, and the
     // grant it carries is projected.
