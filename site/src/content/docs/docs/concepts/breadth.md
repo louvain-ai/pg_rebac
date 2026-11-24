@@ -62,7 +62,7 @@ took 12 ms at recall 0.95. The study's router sent readers below 50 containers t
 relaxed ANN, and it returned all k rows at every measured breadth. The right threshold depends on your passages per container; measure it with
 [the study's harness](/docs/performance/#reproduce-it).
 
-From 0.2.0 (unreleased), `rebac.fenced_ids(p, tbl, q, k)` makes the choice for you. It counts the reader's
+`rebac.fenced_ids(p, tbl, q, k)` makes the choice for you. It counts the reader's
 candidate rows up to `exact_below_rows` (default 5,000), stopping there, and sorts them exactly below it, or runs
 the fenced HNSW scan with `relaxed_order` above it. Measured on the study's data (k = 20, p50):
 

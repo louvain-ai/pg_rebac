@@ -35,11 +35,10 @@ The SQL is installed separately, with `psql` or your migrations. No published im
 - **Heartbeat.** Beats every `heartbeat_ms` while both SpiceDB and Postgres answer. See
   [the two bounds](/docs/concepts/consistency/#two-bounds-liveness-and-freshness). A beat is liveness, not
   freshness.
-- **Watch.** From 0.2.0 (unreleased), applies SpiceDB's Watch stream: a revocation made outside `rebac.write` is
+- **Watch.** Applies SpiceDB's Watch stream: a revocation made outside `rebac.write` is
   narrowed in one transaction with the stream's position, under the same lock order as a commit, and everyone it
   affects is refreshed fully consistent; a grant queues a refresh. While the stream is down or a message cannot be
-  applied, the heartbeat stops, so reads fail closed. In 0.1.x Watch only counts such writes, and the sweep narrows
-  them.
+  applied, the heartbeat stops, so reads fail closed.
   A schema change on the stream starts a closure re-check at once, and the stream reopens on the new closure's types.
   A reopened stream replays what happened while it was down, and reads stay closed until the whole replay is applied:
   the daemon reads SpiceDB's head revision when the stream opens (a fully consistent check, read-only) and counts the
