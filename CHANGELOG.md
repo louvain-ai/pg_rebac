@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.2.0)
+## 0.2.0 (unreleased: versions in Cargo.toml, META.json and npm are bumped at release)
 
 - **Revocations made outside `rebac.write` are applied from Watch (G10).** Watch was observe-only; a delete written
   straight to SpiceDB (another service, the `zed` CLI) waited for the sweep (15 minutes) or the freshness bound
