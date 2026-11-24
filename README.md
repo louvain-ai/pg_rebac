@@ -127,6 +127,7 @@ Slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tes
 ```sh
 # 1. The schema, on any Postgres 14+ (no extension needed):
 psql -v ON_ERROR_STOP=1 -f sql/rebac.sql
+#    or from your own migrations, with the SQL bundled for Node: npm i pg-rebac
 
 # 2. The daemon:
 cargo build --release -p rebacd

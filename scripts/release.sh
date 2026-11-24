@@ -49,7 +49,7 @@ else
   confirm "cargo publish -p rebacd"; cargo publish -p rebacd
 fi
 
-echo "== 4. npm: @louvain/pg-rebac"
+echo "== 4. npm: pg-rebac"
 (cd packages/npm && npm install --no-audit --no-fund --no-package-lock >/dev/null)
 if [ "$dry" = 1 ]; then
   (cd packages/npm && npm publish --dry-run --access public)

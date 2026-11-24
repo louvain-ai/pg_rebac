@@ -28,6 +28,17 @@ or later, hosted or not. Everything lives in the schema `rebac`.
 psql -v ON_ERROR_STOP=1 -f sql/rebac.sql
 ```
 
+From a Node application's own migrations, the same SQL is bundled on npm:
+
+```sh
+npm i pg-rebac
+```
+
+```ts
+import { migrate } from "pg-rebac";
+await migrate((text) => client.query(text)); // node-postgres; postgres.js: (text) => sql.unsafe(text)
+```
+
 Running it again is safe: tables are created `if not exists` and functions are replaced.
 
 ## A first readable set
