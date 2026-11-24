@@ -21,6 +21,8 @@ const description =
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    {/* Starlight writes the docs pages' canonical from `site`; this cover is outside Starlight, so it writes its own. */}
+    <link rel="canonical" href={new URL("/", Astro.site).href} />
     {!indexable && <meta name="robots" content="noindex, nofollow" />}
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script is:inline>
