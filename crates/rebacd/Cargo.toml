@@ -5,10 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["postgres", "spicedb", "authorization", "rebac", "permissions"]
+categories = ["database", "authentication"]
 rust-version.workspace = true
 
 [dependencies]
-rebac-schema = { path = "../rebac-schema" }
+rebac-schema = { path = "../rebac-schema", version = "0.1.0" }
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
