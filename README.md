@@ -107,6 +107,10 @@ REBAC_IT=1 cargo test -p rebacd --test integration    # the daemon against the r
 REBAC_TLS_IT=1 REBAC_TLS_CA=$(tests/tls/up.sh) cargo test -p rebacd --test tls   # sslmode against a TLS Postgres
 ```
 
+## Website
+
+The cover page and docs live in [`site/`](site/) (Astro Starlight): `cd site && npm ci && npm run dev`.
+
 ## Licence
 
 Apache-2.0. See `LICENSE` and `NOTICE`. The vendored SpiceDB API protos are Apache-2.0 (Authzed); see
