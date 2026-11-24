@@ -86,6 +86,36 @@ pub async fn diff(
     Ok(d)
 }
 
+/// Every tenant with a projected principal, summed. Extra and missing stay separate totals.
+pub async fn all_tenants(
+    ctx: &Ctx,
+    sample: Option<i64>,
+    against: Against,
+) -> anyhow::Result<(usize, Diff)> {
+    let db = ctx.pool.get().await?;
+    let tenants: Vec<String> = db
+        .query(
+            "select distinct tenant from rebac.principal_state where state = 'projected'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    drop(db);
+    let mut total = Diff::default();
+    for t in &tenants {
+        let d = diff(ctx, t, sample, against, "readable").await?;
+        total.principals += d.principals;
+        total.principals_with_extras += d.principals_with_extras;
+        total.principals_with_missing += d.principals_with_missing;
+        total.extra_rows += d.extra_rows;
+        total.missing_rows += d.missing_rows;
+        total.unavailable += d.unavailable;
+    }
+    Ok((tenants.len(), total))
+}
+
 /// THE CROSS-TENANT CHECK: every principal id that appears in more than one tenant, diffed in each.
 pub async fn isolation(ctx: &Ctx) -> anyhow::Result<Diff> {
     let db = ctx.pool.get().await?;

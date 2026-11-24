@@ -405,6 +405,17 @@ async fn the_daemon_end_to_end() {
         before,
         "shadow leaves the live projection alone"
     );
+    project::refresh_one(&shadow, "globex", "ana", None, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let (tenants, all) = verify::all_tenants(&shadow, None, verify::Against::Shadow)
+        .await
+        .unwrap();
+    assert_eq!(
+        (tenants, all.extra_rows, all.missing_rows),
+        (2, 0, 0),
+        "{all:?}"
+    );
     let d = verify::diff(&shadow, "acme", None, verify::Against::Shadow, "readable")
         .await
         .unwrap();

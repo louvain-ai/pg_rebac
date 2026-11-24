@@ -47,6 +47,9 @@ enum Cmd {
         closure: bool,
         #[arg(long)]
         shadow: bool,
+        /// Every tenant with a projected principal, printed as ONE line of totals (for a scheduled job; no ids).
+        #[arg(long)]
+        all_tenants: bool,
     },
     /// Print the closure derived from the live schema; --write stores it in rebac.view_relation.
     Closure {
@@ -95,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
             isolation,
             closure: check_closure,
             shadow,
+            all_tenants,
         } => {
             let ctx = Ctx::connect(config).await?;
             let mut bad = false;
@@ -112,6 +116,19 @@ async fn main() -> anyhow::Result<()> {
                 let d = verify::isolation(&ctx).await?;
                 bad |= d.extra_rows > 0;
                 println!("{}", serde_json::json!({ "isolation": d }));
+            }
+            if all_tenants {
+                let against = if shadow {
+                    verify::Against::Shadow
+                } else {
+                    verify::Against::SpiceDb
+                };
+                let (tenants, d) = verify::all_tenants(&ctx, sample, against).await?;
+                bad |= d.extra_rows > 0;
+                println!(
+                    "{}",
+                    serde_json::json!({ "verify": if shadow { "shadow" } else { "spicedb" }, "tenants": tenants, "totals": d })
+                );
             }
             if let Some(t) = tenant {
                 let against = if shadow {
