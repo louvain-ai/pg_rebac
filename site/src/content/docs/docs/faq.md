@@ -1,6 +1,6 @@
 ---
 title: FAQ
-description: pg_rebac against filtering after retrieval, Postgres row-level security, SpiceDB on its own and AuthZed Materialize, and the name.
+description: pg_rebac against filtering after retrieval, Postgres row-level security, SpiceDB on its own, AuthZed Materialize and the SpiceDB FDW, and the name.
 ---
 
 ## Why not just filter results after retrieval?
@@ -33,22 +33,30 @@ choose the principal is spelled out in [row-level security](/docs/concepts/reada
 explicitly in each query, as the examples do. The two compose: RLS decides where the fence is applied, pg_rebac
 decides what it holds.
 
-## How does it compare with AuthZed Materialize?
+## How does it compare with AuthZed Materialize and the SpiceDB FDW?
 
-Both keep a precomputed copy of SpiceDB permissions near the data, so a read does not wait on a permission check.
-They differ in scope and in where the copy lives.
+Both are AuthZed's. As their docs describe them on 2026-11-24:
 
-- **AuthZed Materialize** is AuthZed's commercial service. It supports a broader range of SpiceDB schemas, and it
-  publishes permission changes as streams that any datastore can consume, Postgres or not.
+- **AuthZed Materialize** precomputes the permissions you configure. It is available on AuthZed Dedicated only. Its
+  Accelerated Queries speed up SpiceDB's own check and lookup calls; its Event Streams, in early access, stream
+  permission sets for you to store in your own database or search index. Caveats, wildcards, `.all` intersections and
+  expiring relationships cannot be on the path of a materialised permission, and the docs say an application
+  consuming the stream must tolerate some lag
+  ([limitations](https://authzed.com/docs/materialize/getting-started/limitations)).
+- **The SpiceDB Postgres FDW** is a proxy that speaks the Postgres wire protocol and turns each query into SpiceDB
+  API calls (CheckPermission, LookupResources or LookupSubjects). Its docs call it experimental, and list joins
+  between its tables and subqueries as unsupported ([Postgres FDW](https://authzed.com/docs/spicedb/ops/postgres-fdw)).
 - **pg_rebac** is Apache-2.0 and lives inside Postgres:
-  - the projection is an ordinary table, and Postgres plans the fence as a join, with tested paths for pgvector's
-    HNSW scans (relaxed iterative scans, and an exact path for narrow readers);
+  - the projection is an ordinary table that `rebacd` keeps, and Postgres plans the fence as a join, with tested
+    paths for pgvector's HNSW scans (relaxed iterative scans, and an exact path for narrow readers);
+  - a warm read makes no call to SpiceDB;
   - a revocation written through `rebac.write` is removed in the same transaction that writes it, for the
     [schema shapes it supports](/docs/schema-support/): direct relations, arrows and one level of subject sets.
     Schemas outside those are refused.
 
-Choose Materialize for broader schema coverage, or to feed permissions to more than one datastore. Choose pg_rebac
-for an open-source fence that is part of the Postgres query plan, with revocations tied to the writing transaction.
+Choose Materialize for a schema shape pg_rebac refuses and Materialize supports, or to feed permissions to more than one
+datastore. Choose pg_rebac for an open-source fence that is part of the Postgres query plan, on any Postgres, with
+revocations tied to the writing transaction.
 
 ## Why not ask SpiceDB on every query?
 
@@ -73,8 +81,13 @@ The schema targets Postgres 14 and later. The test suite and the planner study r
 
 ## Is it production-ready?
 
-Not yet. It is slice 1 and pre-release. At Louvain it is running in shadow: a shadow `rebacd` projects from SpiceDB
-into `rebac.readable_shadow`, the projection is compared against SpiceDB, and no read is switched to it.
+Not yet. It is slice 1 and pre-release. Louvain runs it in shadow in production:
+
+- Louvain's own permission projection is mirrored into pg_rebac's tables, in each writer's transaction;
+- a shadow `rebacd` re-projects every reader from SpiceDB into `rebac.readable_shadow`;
+- once a day, `rebacd verify --all-tenants --shadow` compares the two and exits non-zero on any extra row.
+
+No production read is served by pg_rebac yet.
 
 ## Why the name? Wasn't it pg_fence?
 

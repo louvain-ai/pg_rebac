@@ -161,4 +161,4 @@
 - **Liveness fails closed by default** (5 s), as the owner decided, and so does freshness (one hour). Revocations
   through the outbox never wait on either.
 - **Consistency is `at_least_as_fresh`** by default, as the owner decided. `fully_consistent` is a setting.
-- **Subject sets, one level, are supported in slice 1.** The first production schema uses them.
+- **Subject sets, one level, are supported in slice 1.** Louvain's schema, the first pg_rebac runs against (in shadow), uses them.

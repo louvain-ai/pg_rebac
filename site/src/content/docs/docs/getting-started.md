@@ -43,7 +43,7 @@ Running it again is safe: tables are created `if not exists` and functions are r
 
 ## A first readable set
 
-In production the `rebacd` daemon fills the projection from SpiceDB and heartbeats. Reads fail closed when the
+In a deployment, the `rebacd` daemon fills the projection from SpiceDB and heartbeats. Reads fail closed when the
 heartbeat is older than `max_staleness_ms` (5,000 by default), and when a principal's set was looked up longer ago
 than `max_projection_age_ms` (one hour). To try the SQL on its own, turn both bounds off and project a principal by
 hand with `rebac.project`, the same entry point the daemon uses:

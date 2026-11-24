@@ -13,8 +13,8 @@ export const users: User[] = [
   {
     name: "Louvain",
     href: "https://louvain.ai",
-    line: "pg_rebac is the permission layer behind Louvain, company memory for AI that only shows each person what they're allowed to see.",
-    status: "Running in shadow: projected and compared against SpiceDB, with no reads switched to it yet.",
+    line: "Company memory for AI that only shows each person what they're allowed to see. pg_rebac is being proven there as its permission fence.",
+    status: "Running in shadow in production: Louvain's permissions are mirrored into it and compared daily with a projection rebuilt from SpiceDB. No reads are served from it yet.",
     mark: "louvain",
   },
 ];

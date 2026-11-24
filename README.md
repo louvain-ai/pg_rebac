@@ -86,6 +86,10 @@ Because a search engine's `limit` runs before your filter, and everything it com
 
 Slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tests and studies below.
 
+Louvain runs it in shadow in production: its permission projection is mirrored into pg_rebac, a shadow `rebacd`
+re-projects every reader from SpiceDB, and `rebacd verify --all-tenants --shadow` compares the two once a day. No
+production read is served by pg_rebac yet.
+
 ## What you get
 
 - **One read primitive.** `rebac.readable_set(principal)` is the containers a principal may view, optionally
