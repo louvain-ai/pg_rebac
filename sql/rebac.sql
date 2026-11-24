@@ -207,6 +207,15 @@ alter table rebac.watch_state add column if not exists watched_at timestamptz;
 -- is kept under scope 'watch_applied' (0.1's observe-only position, scope 'watch', applied nothing).
 alter table rebac.watch_state add column if not exists gap_at timestamptz;
 
+-- WATCH CURRENCY, per principal. `current_at` is when the applied Watch stream was last known caught up (every change
+-- SpiceDB committed before it delivered and applied); only the daemon's caught-up stream moves it (rebac.watch_alive),
+-- never a replayed message. `watch_required` is set by a live daemon with Watch on. While it is true, a principal is
+-- read only if Watch was current, or its own lookup began, within `watch_grace_ms` (rebac.watch_ok): when the stream
+-- drops, a principal looked up since is still exact, and everyone else fails closed only after the grace.
+alter table rebac.watch_state add column if not exists current_at timestamptz;
+alter table rebac.watch_state add column if not exists watch_required boolean not null default false;
+insert into rebac.config (key, value) values ('watch_grace_ms', '5000') on conflict (key) do nothing;
+
 -- Functions the application registers to run inside a narrowing transaction: fn(tenant text, containers text[]).
 create table if not exists rebac.narrow_hook (
   fn regprocedure primary key
@@ -1427,11 +1436,50 @@ language sql volatile as $$
   update rebac.refresh set zedtoken = '', generation = generation + 1;
 $$;
 
--- The stream is connected and every change it delivered is applied: the applied position is current as of now.
-create or replace function rebac.watch_alive() returns void
+-- The stream is connected and every change it delivered is applied: the applied position is current as of `at` (the
+-- time the daemon read SpiceDB's head when it confirms a catch-up, else now).
+drop function if exists rebac.watch_alive();
+create or replace function rebac.watch_alive(at timestamptz default null) returns void
 language sql volatile as $$
-  update rebac.watch_state set watched_at = now() where scope = 'watch_applied'
+  update rebac.watch_state set watched_at = now(),
+    current_at = greatest(current_at, least(coalesce(at, now()), now()))
+  where scope = 'watch_applied'
 $$;
+
+-- A live daemon says whether reads depend on its Watch stream: true with Watch on, false with `watch = false`.
+create or replace function rebac.watch_required(required boolean) returns void
+language sql volatile as $$
+  insert into rebac.watch_state (scope, watch_required) values ('watch_applied', required)
+  on conflict (scope) do update set watch_required = excluded.watch_required
+$$;
+
+-- May a set looked up at `looked_up_at` be read, as far as Watch goes? Raises RB503, else returns.
+--   * THE GAP: Watch restarted from head, so changes made outside rebac.write before `gap_at` were never applied; a
+--     set looked up before it (or of unknown age) is not read until re-projected.
+--   * THE GRACE: with Watch required, a change made outside rebac.write is applied only once the caught-up stream
+--     delivers it. A set is exact as of the later of its own lookup and the last time Watch was current; it is read
+--     while that is within `watch_grace_ms` (0 turns the grace check off). So a dropped stream fails closed only the
+--     principals not looked up since, and only after the grace; POST /lookup re-projects one at once.
+create or replace function rebac.watch_ok(t text, looked_up_at timestamptz) returns void
+language plpgsql stable parallel safe as $$
+declare
+  w rebac.watch_state;
+  grace bigint := coalesce(rebac.setting('watch_grace_ms'), '0')::bigint;
+begin
+  select * into w from rebac.watch_state where scope = 'watch_applied';
+  if not found then return; end if;
+  if w.gap_at is not null and (looked_up_at is null or looked_up_at < w.gap_at) then
+    raise exception 'rebac: this principal was projected before Watch last lost its position'
+      using errcode = 'RB503', hint = 'rebac_watch_gap: the sweep the daemon forced, or POST /lookup, re-projects it';
+  end if;
+  if w.watch_required and grace > 0
+     and statement_timestamp() - coalesce(greatest(w.current_at, looked_up_at), '-infinity')
+         > grace * interval '1 millisecond' then
+    raise exception 'rebac: the Watch stream has not been current within % ms, and this principal was looked up before', grace
+      using errcode = 'RB503',
+            hint = 'rebac_watch: rebacd reconnects Watch; POST /lookup re-projects this principal now';
+  end if;
+end $$;
 
 -- The daemon's closure transitions. INVALIDATE: reads fail closed from now on. ACCEPT: the rebuild is done; the
 -- principals projected before `changed_at` still fail closed one by one until each is re-projected.

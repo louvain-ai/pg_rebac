@@ -467,6 +467,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
     // `watch_marker = true` instead touches a marker relationship and waits for its own revision, for a datastore
     // whose revisions crate::revision cannot compare.
     let mut caught_up = false;
+    let opened = std::time::Instant::now();
     let target = if apply {
         Some(catch_up_target(ctx).await?)
     } else {
@@ -523,10 +524,15 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
         if !caught_up && target.as_ref().is_some_and(|t| t.reached(token.as_deref())) {
             caught_up = true;
             ctx.watch_current.store(true, Ordering::SeqCst);
+            // Current as of when the head was read, not now: what was committed since may still be in flight.
+            let since_ms = opened.elapsed().as_secs_f64() * 1000.0;
             ctx.pool
                 .get()
                 .await?
-                .execute("select rebac.watch_alive()", &[])
+                .execute(
+                    "select rebac.watch_alive(now() - $1 * interval '1 millisecond')",
+                    &[&since_ms],
+                )
                 .await?;
             tracing::debug!("Watch caught up: the stream is past the revision read when it opened");
         }

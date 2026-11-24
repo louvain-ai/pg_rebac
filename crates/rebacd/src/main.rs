@@ -185,6 +185,14 @@ async fn run(ctx: Arc<Ctx>) -> anyhow::Result<()> {
     if let Err(e) = loops::ensure_watch_position(&ctx).await {
         tracing::warn!(error = %rebacd::logs::kind_of(&e), "could not store a Watch position at start; the Watch loop retries");
     }
+    // Whether reads depend on this daemon's Watch stream (rebac.watch_ok's grace): only a live daemon says so.
+    if ctx.config.mode == Mode::Live {
+        ctx.pool
+            .get()
+            .await?
+            .execute("select rebac.watch_required($1)", &[&ctx.config.watch])
+            .await?;
+    }
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let mut tasks = vec![
         (
