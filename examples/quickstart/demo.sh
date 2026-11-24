@@ -6,15 +6,18 @@ q() { psql "$DB" -v ON_ERROR_STOP=1 -qAt "$@"; }
 q -f /quickstart/seed.sql >/dev/null
 
 echo "Waiting for rebacd to relay the relationships to SpiceDB and project alice and bob..."
-for _ in $(seq 1 60); do
-  ready=$(q -c "select string_agg(principal || ':' || containers, ' ' order by principal) from (
-                  select principal, string_agg(container, ',' order by container) as containers
-                  from rebac.readable where tenant = 'acme' and principal in ('alice', 'bob') group by principal) x")
-  [ "$ready" = "alice:handbook,payroll bob:deals,handbook" ] && break
+# Ready means the reads the demo makes succeed: both people projected, and the daemon live (heartbeating).
+want="alice:handbook,payroll bob:deals,handbook"
+ready=""
+for _ in $(seq 1 90); do
+  ready=$(q -c "set rebac.tenant = 'acme'" -c "select string_agg(who || ':' || cs, ' ' order by who) from (
+                  select who, (select string_agg(c, ',' order by c) from rebac.readable_set(who) c) as cs
+                  from unnest(array['alice', 'bob']) who) x" 2>/dev/null) || ready=""
+  [ "$ready" = "$want" ] && break
   sleep 1
 done
-if [ "$ready" != "alice:handbook,payroll bob:deals,handbook" ]; then
-  echo "rebacd did not project alice and bob within 60 s; see the rebacd service's logs (docker compose ... logs rebacd)" >&2
+if [ "$ready" != "$want" ]; then
+  echo "rebacd did not project alice and bob within 90 s; see the rebacd service's logs (docker compose ... logs rebacd)" >&2
   exit 1
 fi
 
