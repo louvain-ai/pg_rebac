@@ -101,32 +101,13 @@ fn refuses_exclusion_inside_a_reached_permission() {
 }
 
 #[test]
-fn accepts_intersection_as_monotone() {
-    // `&` is monotone: removing any tuple of any branch can only narrow, and narrowing a container that another
-    // branch still grants is the over-narrowing a refresh restores. Every branch's relations join the closure.
-    let s = parse(
-        "definition user {} definition workspace { relation member: user } \
-         definition doc { relation workspace: workspace relation reader: user relation cleared: user \
-         permission view = (reader + workspace->member) & cleared }",
-    )
-    .unwrap();
-    let got = closure(&s, "doc", "view").unwrap();
-    assert!(got.contains(&rel("doc", "reader", Kind::Direct, None, None)));
-    assert!(got.contains(&rel("doc", "cleared", Kind::Direct, None, None)));
-    assert!(got.contains(&rel(
-        "doc",
-        "workspace",
-        Kind::Arrow,
-        Some("workspace"),
-        None
-    )));
-    assert!(got.contains(&rel(
-        "workspace",
-        "member",
-        Kind::Via,
-        None,
-        Some("workspace")
-    )));
+fn refuses_intersection() {
+    // Narrowing at commit keeps a container another granted relation still holds (sound for a union); under `&` that
+    // would keep a container whose other branch was revoked, so the closure refuses it.
+    refused(
+        "definition user {} definition doc { relation a: user relation b: user permission view = a & b }",
+        "intersection",
+    );
 }
 
 #[test]

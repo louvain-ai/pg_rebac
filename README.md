@@ -234,7 +234,7 @@ type, the permission, the tenant separator) lives in the `rebac.config` table, w
 
 ## Supported schemas
 
-The projected permission, `container#view` by default, may be any union (`+`) or intersection (`&`) of:
+The projected permission, `container#view` by default, may be any union (`+`) of:
 
 - direct relations;
 - a self-arrow (`parent->view`);
@@ -246,6 +246,7 @@ The projected permission, `container#view` by default, may be any union (`+`) or
 Refused, each with its reason:
 
 - exclusion (`-`): removing a tuple from its subtracted side grants;
+- intersection (`&`): narrowing keeps a container another granted relation still holds, which is right for a union only;
 - the intersection arrow (`.all()`): removing one of its tuples can grant;
 - caveats and expiring relationships;
 - wildcards on a relation reached through an arrow, or inside a subject set;

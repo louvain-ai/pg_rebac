@@ -9,7 +9,7 @@ SpiceDB schema and works out which relations can change that permission: the clo
 
 ## Supported
 
-The projected permission may be any union (`+`) or intersection (`&`) of:
+The projected permission may be any union (`+`) of:
 
 - **direct relations** (`member`, `editor`);
 - **a self-arrow** (`parent->view`), a container under another container;
@@ -17,11 +17,6 @@ The projected permission may be any union (`+`) or intersection (`&`) of:
 - **subject sets one level deep** (`group#member`, where `group#member` holds plain object types);
 - **wildcards** (`user:*`) on a relation of the projected type. A wildcard grant refreshes
   every principal the tenant knows; its removal narrows every holder of the container at commit, like an arrow's.
-
-Both union and intersection are monotone: removing a tuple of any branch can only take access away. So a delete on
-any branch narrows at commit, even where another branch of a union still grants the container; that over-narrowing is
-restored by the refresh that follows, and it is the one direction a fence may err. A grant on any branch queues a
-refresh, and SpiceDB's lookup decides whether every branch of an intersection now holds.
 
 A schema of the shape the tests are built on:
 
@@ -73,6 +68,7 @@ supported again ([schema changes while running](/docs/rebacd/#schema-changes-whi
 | Construct | Reason |
 |---|---|
 | Exclusion (`a - b`) | Not monotone: removing a tuple from `b` grants, and adding one revokes, which no delete-driven narrowing sees. |
+| Intersection (`a & b`) | Narrowing at commit keeps a container that another relation the outbox shows granted still holds. That is exact for a union and would keep a container whose other branch was just revoked. |
 | Intersection arrow (`.all()`) | Not monotone: removing one of its tuples leaves fewer targets that must all hold, which can grant. |
 | Caveats (`with some_caveat`) | A caveated relationship cannot be evaluated locally. |
 | Expiring relationships (`with expiration`) | Cannot be evaluated locally. |

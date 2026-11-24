@@ -1,8 +1,8 @@
-# Deeper arrows, exclusion and `.all()`: what narrowing would need
+# Intersection, deeper arrows, exclusion and `.all()`: what narrowing would need
 
 [`schema-support`](../../site/src/content/docs/docs/schema-support.md) lists what the closure accepts: unions and
-intersections of direct relations, a self-arrow, an arrow one hop to another type, subject sets one level deep, and
-wildcards on the projected type. This note is the design for the three shapes it still refuses for a structural
+direct relations, a self-arrow, an arrow one hop to another type, subject sets one level deep, and
+wildcards on the projected type. This note is the design for the shapes it refuses for a structural
 reason, and what each would cost. None of it is built.
 
 ## The rule every shape must keep
@@ -13,7 +13,18 @@ mirrors it holds (`rebac.edge`, `rebac.set_grant`, the outbox), so a shape is ac
 1. removing a tuple can never grant (otherwise a delete would have to widen someone), and
 2. every tuple whose removal can narrow is mirrored, so the commit can find who held what through it.
 
-Unions and intersections meet both. The shapes below break one or the other.
+Unions meet both. The shapes below break one or the other, or a third rule that narrowing itself assumes.
+
+## Intersection (`a & b`)
+
+Monotone, and every tuple is mirrored, so rules 1 and 2 hold. What breaks is narrowing's "still held" rule: a
+removal keeps a container that another closure relation the outbox shows granted to the same principal still holds
+(`tests/sql/04_narrowing.sql`). For `a + b` that is exact. For `a & b`, removing `b` must take the container away even
+though `a` still holds.
+
+Design: the closure marks the relations under an intersection, and narrowing skips the still-held check for a removal
+of such a relation (narrowing too far is the safe direction; the refresh that follows restores what SpiceDB still
+grants). The change is in `narrow_seqs`, which the projection-scale work is rewriting, so it lands after it.
 
 ## Arrows more than one hop away (`workspace->org->member`)
 

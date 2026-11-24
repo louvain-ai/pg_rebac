@@ -17,10 +17,7 @@
   holds it). A lookup's reply names how many containers a principal reads, and any caller could make the daemon ask
   SpiceDB; with a token set, anything else is a 401. A non-loopback `listen` without a token logs a warning.
 
-- **Intersections (`&`) are projected.** Like a union, an intersection is monotone, so every branch's relations join
-  the closure: a delete on any branch narrows at commit, and a grant queues a refresh. `.all()` and exclusion stay
-  refused, and every refusal now states why.
-
+- **Every schema refusal states its reason** (the closure's messages said "not supported").
 - **Several daemons on one database, safely: leader election.** Only the daemon holding a session advisory lock
   (`1919050596, 1`; shadow `1919050596, 2`) runs Watch, the closure check and the sweep; every daemon relays,
   refreshes and serves `/lookup`. Every Watch write is fenced by `rebac.assert_leader(pid, lock_key)` (new), so a

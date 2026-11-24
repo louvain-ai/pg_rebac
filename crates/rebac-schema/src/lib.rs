@@ -7,8 +7,7 @@
 //!
 //! The shapes it accepts, for the projected type `R` and permission `p`:
 //!
-//! - `p` is a union (`+`) or an intersection (`&`) of relations and permissions on `R`: both are monotone, so a
-//!   delete on any branch narrows (over-narrowing what another branch still grants, which a refresh restores);
+//! - `p` is a union (`+`) of relations and permissions on `R`;
 //! - a relation on `R` whose allowed types are plain object types: `direct`;
 //! - an arrow `t->p` where `t` is a relation on `R` pointing back at `R`: a self-arrow (a file under its space);
 //! - an arrow `t->q` where `t` points at another type `W` and `q` is a union of plain relations on `W`: the arrow is
@@ -19,7 +18,8 @@
 //! - a direct or via relation may also accept a SUBJECT SET `T#r` (`group#member`), where `r` is a plain relation on
 //!   `T` whose allowed types are object types: `r` on `T` is kind `set` (its tuples are memberships).
 //!
-//! Refused, each with its reason: exclusion (`-`, adding a tuple can revoke), `.all()` (removing a tuple can grant), caveats,
+//! Refused, each with its reason: exclusion (`-`, adding a tuple can revoke), intersection (`&`, narrowing keeps what another
+//! granted relation holds), `.all()` (removing a tuple can grant), caveats,
 //! expiring relationships, a wildcard on a relation reached through an arrow, a subject set that is itself a permission or holds further subject
 //! sets (nested groups), and an arrow more than one hop away.
 
@@ -310,14 +310,13 @@ impl Walk<'_> {
                     self.expr(ty, name, x, through);
                 }
             }
-            // An intersection is monotone, as a union is: removing a tuple of any branch can only narrow, so every
-            // branch's relations narrow on a delete and refresh on a grant. Narrowing a container that another branch
-            // still grants is over-narrowing, which the refresh that follows restores (and the fence may err that way).
-            Expr::Intersect(xs) => {
-                for x in xs {
-                    self.expr(ty, name, x, through);
-                }
-            }
+            // An intersection is refused although it is monotone: narrowing at commit keeps a container that another
+            // relation the outbox shows granted still grants (the "still held" rule, sound for a union), which under
+            // `&` would keep a container whose other branch was just revoked.
+            Expr::Intersect(_) => self.refuse(
+                at,
+                "an intersection (&) is refused: narrowing keeps a container another granted relation still holds, which is sound for a union and not for an intersection",
+            ),
             Expr::Exclude(_, _) => self.refuse(
                 at,
                 "an exclusion (-) is refused: adding a tuple to its subtracted side revokes, and only removals narrow",

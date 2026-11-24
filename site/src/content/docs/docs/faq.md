@@ -57,8 +57,8 @@ Both are AuthZed's. As their docs describe them on 2026-11-24:
     paths for pgvector's HNSW scans (relaxed iterative scans, and an exact path for narrow readers);
   - a warm read makes no call to SpiceDB;
   - a revocation written through `rebac.write` is removed in the same transaction that writes it, for the
-    [schema shapes it supports](/docs/schema-support/): unions and intersections of direct relations, arrows and one
-    level of subject sets.
+    [schema shapes it supports](/docs/schema-support/): unions of direct relations, arrows and one level of subject
+    sets.
     Schemas outside those are refused.
 
 Choose Materialize for a schema shape pg_rebac refuses and Materialize supports, or to feed permissions to more than one
@@ -87,8 +87,8 @@ Reads fail closed, with bounds you set:
   `watch_grace_ms` (5 s); the rest are `RB503` until Watch is back or `POST /lookup` re-projects them;
 - a set whose lookup is older than `max_projection_age_ms` (one hour) is `RB503`.
 
-Run two or more daemons for availability: one leads (Watch, the closure check, the sweep) and another takes over
-within seconds ([rebacd](/docs/rebacd/#several-daemons)).
+Run two or more daemons for availability: one leads (Watch, the closure check, the sweep), and another takes over
+within 2 s of a clean stop, or about 25 s after its host dies ([rebacd](/docs/rebacd/#several-daemons)).
 
 ## How fresh is it, and what about zedtokens?
 

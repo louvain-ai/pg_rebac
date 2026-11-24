@@ -91,3 +91,14 @@ select t.eq(rebac.narrow_pending(), 1, 'explicit narrow');
 select rebac.write('delete', 'container:acme/z2', 'member', 'user:acme/ex');
 commit;
 select t.eq(t.set_of('ex'), '{}'::text[], 'rows written after an explicit narrow are narrowed at commit');
+
+-- WHY AN INTERSECTION IS REFUSED: removing one granted relation keeps a container another relation the outbox shows
+-- granted still holds. That is exact for a union (`member + editor`) and would fail open for `member & editor`.
+insert into rebac.view_relation (resource_type, relation, kind) values ('container', 'editor', 'direct')
+  on conflict do nothing;
+select rebac.write('touch', 'container:acme/both', 'member', 'user:acme/kim');
+select rebac.write('touch', 'container:acme/both', 'editor', 'user:acme/kim');
+select rebac.project('acme', 'kim', array['both'], 't', 'live', now());
+select rebac.write('delete', 'container:acme/both', 'editor', 'user:acme/kim');
+select rebac.narrow_pending();
+select t.eq(t.set_of('kim'), array['both'], 'a union: still granted through member, so kept');
