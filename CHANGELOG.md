@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.1
+
+- **Security fix: leaving a subject set granted through a via relation is in force at commit.** With a schema where a
+  relation reached through an arrow accepts a subject set (`workspace#admin: user | group#member`, with
+  `view = ... + workspace->admin`), two revocations through `rebac.write`, or seen on Watch, did not narrow at commit:
+  - a member leaving the set (`group:ops#member@user:ana` deleted): ana kept every container under the workspace;
+  - the grant to the set removed (`workspace:w1#admin@group:ops#member` deleted): every member kept them.
+
+  They stayed readable until the member was next re-projected: a refresh queued by the delivery, the sweep (15
+  minutes by default) or the freshness bound (one hour). G2 promises both are gone at commit. Grants to a set on the
+  projected type itself (`container#member@group:ops#member`) were narrowed correctly and are unaffected, as are
+  schemas whose via relations accept no subject set. 0.1.0 and 0.1.1 have the same flaw.
+
+  The fix mirrors a grant to a set through a via relation into `rebac.set_grant`, its object typed (`workspace:w1`),
+  so a membership's removal narrows the containers under it; and narrows every holder of those containers when the
+  grant itself is removed, under the tenant lock, as a grant to a set on the projected type already did. Their delivery
+  now queues those containers for LookupSubjects, so a new grant of this kind reaches members without waiting for the
+  sweep. `tests/sql/16_via_sets.sql` covers both.
+
+  **Upgrade:** re-run `sql/rebac.sql` and restart `rebacd` 0.2.1, then backfill each tenant (`rebacd backfill --tenant
+  <t>`) to mirror existing grants of this kind; until then their removal still waits for a refresh.
+
 ## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security

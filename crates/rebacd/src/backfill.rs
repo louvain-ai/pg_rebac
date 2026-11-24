@@ -41,6 +41,15 @@ pub async fn backfill(ctx: &Ctx, tenant: &str) -> anyhow::Result<Backfilled> {
         .iter()
         .map(|r| r.get(0))
         .collect();
+    let vias: BTreeSet<(String, String)> = db
+        .query(
+            "select resource_type, relation from rebac.view_relation where kind = 'via'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
     let mut out = Backfilled::default();
     let mut subjects = BTreeSet::new();
     for ty in &types {
@@ -82,6 +91,28 @@ pub async fn backfill(ctx: &Ctx, tenant: &str) -> anyhow::Result<Backfilled> {
                     "insert into rebac.set_grant (tenant, container, relation, subject_set) values ($1, $2, $3, $4)
                      on conflict do nothing",
                     &[&tenant, &container, &rel.relation, &format!("{}:{set_id}#{}", sobj.object_type, sub.optional_relation)],
+                )
+                .await?;
+            } else if *ty != ctx.projection.resource_type
+                && !sub.optional_relation.is_empty()
+                && vias.contains(&(ty.clone(), rel.relation.clone()))
+            {
+                // A grant to a subject set through a via relation: mirrored with its object typed.
+                let (Some(obj), Some(set_id)) = (
+                    crate::db::strip(&prefix, &res.object_id),
+                    crate::db::strip(&prefix, &sobj.object_id),
+                ) else {
+                    continue;
+                };
+                db.execute(
+                    "insert into rebac.set_grant (tenant, container, relation, subject_set) values ($1, $2, $3, $4)
+                     on conflict do nothing",
+                    &[
+                        &tenant,
+                        &format!("{ty}:{obj}"),
+                        &rel.relation,
+                        &format!("{}:{set_id}#{}", sobj.object_type, sub.optional_relation),
+                    ],
                 )
                 .await?;
             } else if sobj.object_type == ctx.projection.subject_type
