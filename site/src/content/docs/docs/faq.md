@@ -3,6 +3,24 @@ title: FAQ
 description: pg_rebac against Postgres row-level security, against SpiceDB on its own, and the name.
 ---
 
+## Why not just filter results after retrieval?
+
+Because the search's `limit` runs before your filter, and everything it computed on the way is about rows the reader
+may not see.
+
+- **Top-k starvation.** Take the top 20, drop what the reader may not view, and a reader of 5% of the corpus keeps
+  about one row. The [planner study](/docs/performance/) measures the in-database form of the same mistake, an HNSW
+  scan with `hnsw.iterative_scan = off`: readers of 5%, 10% and 30% breadth got 8%, 20% and 62% of k, with no error.
+- **Over-fetching costs latency and has no floor.** Filling k rows for a reader of breadth b takes about k/b
+  candidates. Fenced in the plan, readers of 5% to 50% got all k rows at recall 0.90 to 0.96 in 4 to 7 ms, against
+  1.9 ms unfenced; readers below about 1% take the exact path, 1.6 ms at full recall.
+- **Counts, snippets and rankings leak.** A total, a highlighted snippet, a facet count or a page offset computed before
+  the filter says something about rows the reader may not view. With the fence in the `where` clause, no such row is
+  ranked, counted or returned.
+
+The quickstart shows the first point on seventeen rows: `docker compose -f examples/quickstart/docker-compose.yml run
+--rm demo` runs one search as two people, then filters after retrieval, and the second person gets one row of five.
+
 ## Why not plain row-level security?
 
 Row-level security is the mechanism, not the data. A policy still needs a fast answer to "may this principal view

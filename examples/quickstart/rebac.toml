@@ -1,0 +1,3 @@
+# rebacd for the quickstart: reach SpiceDB by its compose name, listen inside the compose network only.
+spicedb_endpoint = "http://spicedb:50051"
+listen = "0.0.0.0:7341"

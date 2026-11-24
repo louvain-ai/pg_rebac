@@ -1,0 +1,56 @@
+# The quickstart: Postgres with pgvector, SpiceDB, the rebacd daemon and a demo that runs one query as two people.
+#   docker compose -f examples/quickstart/docker-compose.yml run --rm demo
+#   docker compose -f examples/quickstart/docker-compose.yml down        # stop it and forget everything
+# Nothing listens on the host. The SpiceDB key and the Postgres password are throwaway values for this demo only.
+name: pg_rebac_quickstart
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_PASSWORD: quickstart
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 1s
+      retries: 30
+
+  spicedb:
+    image: authzed/spicedb:v1.56.2
+    command: ["serve", "--grpc-preshared-key", "quickstart-key", "--datastore-engine", "memory",
+              "--datastore-bootstrap-files", "/quickstart/spicedb.yaml"]
+    volumes: ["./spicedb.yaml:/quickstart/spicedb.yaml:ro"]
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 1s
+      retries: 30
+
+  # Installs sql/rebac.sql, exactly as you would on your own Postgres.
+  schema:
+    image: pgvector/pgvector:pg17
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGOPTIONS: "-c client_min_messages=warning"
+    volumes: ["../../sql:/sql:ro"]
+    entrypoint: ["psql", "-v", "ON_ERROR_STOP=1", "-q", "postgres://postgres:quickstart@postgres/postgres",
+                 "-f", "/sql/rebac.sql"]
+
+  rebacd:
+    build: ../..
+    depends_on:
+      schema: { condition: service_completed_successfully }
+      spicedb: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://postgres:quickstart@postgres/postgres
+      SPICEDB_TOKEN: quickstart-key
+    volumes: ["./rebac.toml:/etc/rebac.toml:ro"]
+    command: ["--config", "/etc/rebac.toml", "run", "--accept-schema"]
+
+  demo:
+    image: pgvector/pgvector:pg17
+    depends_on:
+      rebacd: { condition: service_started }
+    environment:
+      DB: postgres://postgres:quickstart@postgres/postgres
+      PGOPTIONS: "-c client_min_messages=warning"
+    volumes: [".:/quickstart:ro"]
+    entrypoint: ["bash", "/quickstart/demo.sh"]

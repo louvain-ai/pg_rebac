@@ -5,6 +5,20 @@ description: Install pg_rebac's SQL, project a first readable set, and fence a p
 
 pg_rebac is slice 1 and pre-release. Everything on this page was run against Postgres 17 with pgvector 0.8.
 
+## See it work in one command
+
+With Docker and a clone of the repository:
+
+```sh
+docker compose -f examples/quickstart/docker-compose.yml run --rm demo
+```
+
+It starts Postgres with pgvector, SpiceDB in memory and `rebacd`, installs `sql/rebac.sql`, writes a small dataset's
+relationships through `rebac.write`, waits for the daemon to project two people, and runs one search as each of them.
+It then shows the same search filtered after retrieval, a revocation in force at commit, and `RB404` for a principal
+nobody has asked about. `docker compose -f examples/quickstart/docker-compose.yml down` forgets it all. The rest of
+this page does the same by hand, without the daemon.
+
 ## Install the SQL
 
 The whole schema is one file of plain SQL and PL/pgSQL. It needs no C extension, so it installs on any Postgres 14

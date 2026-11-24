@@ -1,0 +1,32 @@
+name: Bug report
+description: Something pg_rebac does that it should not, or does not do that it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The SQL you ran (or the `rebacd` command) and everything it printed. The smallest SpiceDB schema and relationships that show it help most. Remove anything private first.
+      render: sql
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: pg_rebac commit
+      description: "`git rev-parse --short HEAD`"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Postgres, pgvector and SpiceDB versions
+      description: "`select version();`, `select extversion from pg_extension where extname = 'vector';` and the SpiceDB image tag."
+    validations:
+      required: true

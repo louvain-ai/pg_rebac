@@ -1,7 +1,19 @@
 # pg_rebac
 
-Permission-aware SQL for Postgres. SpiceDB stays the authority for who may read what. pg_rebac keeps a local,
-indexed projection of one permission, and gives every query the same fence:
+**Every query sees only what its user may read: SpiceDB permissions, enforced inside the Postgres plan, before the
+`order by` and the `limit`.**
+
+[![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-4a3fd0)](LICENSE)
+[![Postgres 14+](https://img.shields.io/badge/postgres-14%2B-336791)](sql/rebac.sql)
+[![Status: pre-release](https://img.shields.io/badge/status-pre--release-7a8494)](#status)
+[![Docs: pgrebac.com](https://img.shields.io/badge/docs-pgrebac.com-4a3fd0)](https://pgrebac.com)
+
+<p align="center">
+  <img src="docs/img/two-readers.svg" width="760" alt="The same full-text query run as two people. alice, who reads handbook and payroll, gets five rows from those two containers; bob, who reads handbook and deals, gets five rows from his. Filtered after retrieval instead, bob would get one row of five, because a container he cannot read takes the other four places.">
+</p>
+
+SpiceDB stays the authority for who may read what. pg_rebac keeps a local, indexed projection of one permission, and
+gives every query the same fence:
 
 ```sql
 set local rebac.tenant = 'acme';
@@ -15,7 +27,54 @@ limit 20;
 Postgres inlines `rebac.readable_set` into a semi-join on the projection's primary key. So the fence sits inside the
 same plan as a pgvector ordering, a full-text match or anything else, and applies before the order and the limit.
 
-**Status:** slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tests and studies below.
+## Try it in one command
+
+You need Docker with Compose. From a clone:
+
+```sh
+docker compose -f examples/quickstart/docker-compose.yml run --rm demo
+```
+
+It starts Postgres with pgvector, SpiceDB (in memory) and the `rebacd` daemon (built from this repository), installs
+`sql/rebac.sql`, seeds a small dataset through `rebac.write`, waits for the daemon to relay it to SpiceDB and project
+two people, then shows:
+
+1. the same search as `alice` and as `bob`, each getting five rows from what they may read;
+2. the same search filtered after retrieval instead, where `bob` gets one row of five;
+3. a revocation in force when its transaction commits, before the daemon has relayed it;
+4. a principal nobody has asked about failing with `RB404`, never an empty set.
+
+The first run pulls the Rust, Postgres and SpiceDB base images and builds the daemon (42 s for the build on a
+10-core laptop, measured from a fresh clone with no build cache); after that a run takes about five seconds. Every file it uses is in
+[`examples/quickstart/`](examples/quickstart/). `docker compose -f examples/quickstart/docker-compose.yml down` stops it
+and forgets everything; nothing listens on your host.
+
+## Why not just filter results after retrieval?
+
+Because a search engine's `limit` runs before your filter, and everything it computed on the way leaks.
+
+- **Top-k starvation.** Fetch the top 20, drop what the user may not read, and a user who reads 5% of the corpus gets
+  about one row. [`docs/planner.md`](docs/planner.md) measures the in-database version of the same mistake (pgvector's
+  HNSW scan with `hnsw.iterative_scan = off`, so the filter only sees the scan's first candidates) on 500,000
+  passages: readers of 5%, 10% and 30% breadth got **8%, 20% and 62% of k**, with no error. The quickstart shows it on
+  seventeen rows: bob asks for five and gets one.
+- **Over-fetching to compensate costs latency and still has no floor.** To fill k rows for a reader of breadth b you
+  must fetch about k/b candidates and hope; a narrow reader needs hundreds of times k. Fenced inside the plan with
+  `relaxed_order`, readers of 5% to 50% breadth got **all k rows at recall 0.90 to 0.96 in 4 to 7 ms**, against
+  1.9 ms for the same HNSW query with no fence at all. A reader below about 1% breadth takes the exact path,
+  `container = any(array(select * from rebac.readable_set(p)))`: **1.6 ms with full recall** at 0.1% breadth, where
+  relaxed ANN took about 100 ms for recall 0.54.
+- **Counts, snippets and rankings leak.** Anything computed before the filter (a "1,240 results" total, a highlighted
+  snippet, a facet count, a "did you mean", a page offset) was computed over rows the user may not read, and says
+  something about them. A fence in the `where` clause means no such row is ranked, counted or returned. (This point is
+  about the shape of the query, not a measurement.)
+- **Failure has to be an answer, not an empty page.** Here a stale projection is `RB503`, a principal nobody has asked
+  about is `RB404`, and a missing tenant is `RB400`; none of them is an empty set by accident, and none of them returns
+  rows it has not checked.
+
+## Status
+
+Slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tests and studies below.
 
 ## What you get
 
@@ -45,7 +104,7 @@ same plan as a pgvector ordering, a full-text match or anything else, and applie
   against a shadow projection. It reports extra rows (a violation, exit 2) and missing rows (freshness) separately,
   as counts only.
 
-## Quickstart
+## Install on your own Postgres
 
 ```sh
 # 1. The schema, on any Postgres 14+ (no extension needed):
@@ -110,6 +169,11 @@ REBAC_TLS_IT=1 REBAC_TLS_CA=$(tests/tls/up.sh) cargo test -p rebacd --test tls  
 ## Website
 
 The cover page and docs live in [`site/`](site/) (Astro Starlight): `cd site && npm ci && npm run dev`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report a vulnerability privately, as [SECURITY.md](SECURITY.md)
+describes, never in a public issue.
 
 ## Licence
 

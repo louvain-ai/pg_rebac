@@ -183,7 +183,10 @@ const description =
 
       <section class="install" aria-labelledby="install">
         <h2 id="install">Install</h2>
-        <pre class="code block"><code><span class="c"># the schema, on any Postgres 14+</span>
+        <pre class="code block"><code><span class="c"># see it work first: Postgres, SpiceDB, rebacd and one query as two people</span>
+docker compose -f examples/quickstart/docker-compose.yml run --rm demo
+
+<span class="c"># the schema, on any Postgres 14+</span>
 psql -v ON_ERROR_STOP=1 -f sql/rebac.sql
 
 <span class="c"># the daemon</span>

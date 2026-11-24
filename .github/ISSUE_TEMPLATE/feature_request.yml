@@ -1,0 +1,23 @@
+name: Feature request
+description: A schema shape, a mode or an operation pg_rebac should support.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and where pg_rebac stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: schema
+    attributes:
+      label: The SpiceDB schema involved
+      description: The definitions and the permission you would project, if this is about schema support.
+      render: text
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
