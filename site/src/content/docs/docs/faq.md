@@ -33,6 +33,11 @@ choose the principal is spelled out in [row-level security](/docs/concepts/reada
 explicitly in each query, as the examples do. The two compose: RLS decides where the fence is applied, pg_rebac
 decides what it holds.
 
+Measured on 500,000 passages ([performance](/docs/performance/)): for an ANN top-20 a policy on the readable set
+cost about the same as the fence in the query. For a query that reads many rows, a policy is planned as a filter on
+the scan, not a join: counting a narrow reader's 501 rows took 0.6 ms with the fence in the query and 17 ms through
+the policy. A policy that calls a check function per row took 3.4 s, whatever the reader.
+
 ## How does it compare with AuthZed Materialize and the SpiceDB FDW?
 
 Both are AuthZed's. As their docs describe them on 2026-11-24:

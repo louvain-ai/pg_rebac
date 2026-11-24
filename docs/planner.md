@@ -178,6 +178,123 @@ Limits that remain: synthetic embeddings, a warm cache, one node and one tenant,
 refreshes or narrowing during the run. The 128- and 768-dimension runs changed several things at once (dimensions,
 container skew, topic affinity), so they are not a controlled comparison.
 
+## The alternatives: row-level security, and filtering after retrieval
+
+`examples/hybrid-pgvector-realistic/alternatives.py` runs on the same 768-dimension data as the second run (a fresh
+build of `setup.sql` with the defaults: 499,868 passages, 20,000 containers, 2.2 million projection rows), on the
+same laptop: Postgres 17.11 and pgvector 0.8.6 in Docker, `shared_buffers = 2GB`, `fsync = off`, a warm cache, one
+client. Latency is pgbench (the first 10 queries of a cell dropped); "rows" is what query 1 returned. Run on 2026-11-24.
+
+### Row-level security
+
+`--rls` puts the fence in a policy instead of the query, four ways, and reads as a role that is neither a superuser
+nor the table's owner (both bypass RLS):
+
+- **query fence**: no policy; `container in (select * from rebac.readable_set(p))` in the query, as above.
+- **rls, set**: `rebac.enable_rls`, a restrictive policy on the same set.
+- **rls, per row**: a policy calling `rebac.readable_by(p, container)`, pg_rebac's own per-row check. It is PL/pgSQL
+  and re-checks the principal (liveness, freshness) for every row, as a call to a check function would. It is local:
+  a per-row call to a remote permission service would cost a round trip per row on top, which was not measured.
+- **rls, exists**: the naive inline policy, `exists (select 1 from rebac.readable r where r.tenant = .. and
+  r.principal = .. and r.container = passage.container)`.
+
+Two shapes: ANN top-20 (`relaxed_order`) and `count(*)` over every row the reader may see. Up to 200 timed queries
+per cell; the per-row `count` cells took 3 to 4 s a query, so they ran 7 to 9 queries and their "p99" is in effect the
+maximum.
+
+```
+reader  passages shape |           query fence |              rls, set |          rls, per row |           rls, exists
+                       |          p50 / p99 ms |          p50 / p99 ms |          p50 / p99 ms |          p50 / p99 ms
+b0001        501 ann   |         122.2 / 185.6 |           51.8 / 86.5 |         422.6 / 465.6 |           48.5 / 59.0
+b0001        501 count |             0.6 / 1.5 |           17.1 / 20.9 | 3416.8 / 3464.1 (n=9) |           45.9 / 51.1
+b001        5291 ann   |          56.3 / 100.0 |           32.0 / 42.7 |          67.5 / 107.4 |           36.8 / 45.0
+b001        5291 count |             1.4 / 1.7 |           17.9 / 28.3 | 3367.7 / 3473.4 (n=8) |           47.3 / 55.0
+b005       25596 ann   |           19.7 / 27.4 |           17.2 / 24.9 |           25.1 / 38.8 |           17.4 / 31.3
+b005       25596 count |             4.9 / 5.7 |           20.1 / 31.4 | 3344.6 / 3915.8 (n=8) |           53.5 / 57.1
+b010       49994 ann   |           11.6 / 16.4 |            9.8 / 14.5 |           13.8 / 19.6 |           10.2 / 14.0
+b010       49994 count |            9.0 / 10.2 |           21.1 / 41.1 | 3411.0 / 3585.7 (n=8) |           55.5 / 58.1
+b020       99988 ann   |             7.1 / 9.8 |            7.1 / 13.7 |            8.3 / 13.4 |            6.6 / 23.9
+b020       99988 count |           17.7 / 32.0 |           23.6 / 27.9 | 3591.1 / 3820.1 (n=7) |           61.2 / 64.7
+b050      249936 ann   |            6.0 / 23.8 |             5.8 / 9.5 |             5.4 / 9.0 |             5.3 / 8.6
+b050      249936 count |           32.0 / 75.6 |           28.0 / 32.6 | 3449.3 / 3502.4 (n=8) |           69.9 / 72.5
+```
+
+What it shows:
+
+1. **The fence works through RLS.** Every form returned the same rows. The question is never "RLS or pg_rebac": a
+   policy still needs an indexed answer to "may this principal view this container", and the projection is that
+   answer.
+2. **A policy is planned as a filter, not a join.** Postgres keeps a policy's quals on the scan (security-barrier
+   quals are not pulled up into joins), so both the `rls, set` and the `rls, exists` policies become a hashed subplan
+   over the reader's containers, probed per row (`EXPLAIN ANALYZE`, below). The query fence is inlined into a
+   semi-join instead, which can drive from the reader's containers through `passage (tenant, container)`.
+3. **For ANN top-k, the policy forms cost about the same.** At 5% breadth and up every form was within a few
+   milliseconds of the query fence (17 to 25 ms at 5%, 5 to 6 ms at 50%). At narrow breadth the hashed probe is
+   cheaper than the fence's per-candidate index probe (0.1%: 49 to 52 ms against 122 ms; 1%: 32 to 37 ms against
+   56 ms), although the exact path (6.7 ms at 0.1%) is the right one there either way. The per-row function is the
+   exception: 423 ms at 0.1% and 68 ms at 1%, because HNSW hands it up to 20,000 candidates and each is a function call.
+4. **For anything that reads many rows, the plan shape decides.** Counting a 0.1% reader's 501 rows took 0.6 ms
+   with the query fence (driven from its 45 containers), 17 ms through `rebac.enable_rls` and 46 ms through the
+   `exists` policy (a scan of all 500,000 rows with a hash probe each), and 3.4 s through the per-row function,
+   whatever the reader's breadth (one PL/pgSQL call per row, about 7 µs each). At 50% the query fence took 32 ms, the
+   set policy 28 ms, the `exists` policy 70 ms and the per-row function 3.4 s.
+
+Plans (one query each, `EXPLAIN (ANALYZE)`):
+
+```
+query fence, count, 0.1% reader:  Nested Loop > Index Only Scan readable_pkey (45 containers)
+                                   > Index Only Scan passage_container_idx (11 rows each)        2.2 ms
+rls, set, count, 0.1% reader:     Parallel Seq Scan passage, Filter: container = ANY (hashed SubPlan)
+                                   (Rows Removed by Filter: 166,456 per worker)                  17.8 ms
+rls, exists, count, 0.1% reader:  Seq Scan passage, Filter: container = ANY (hashed SubPlan)
+                                   (Rows Removed by Filter: 499,367)                             46.2 ms
+query fence, ann, 0.1% reader:    Nested Loop > Index Scan passage_embedding_idx (20,298 candidates)
+                                   > Index Only Scan readable_pkey per candidate                 151.6 ms
+rls, set, ann, 0.1% reader:       Index Scan passage_embedding_idx, Filter: hashed SubPlan
+                                   (Rows Removed by Filter: 20,284)                              66.9 ms
+```
+
+### Filtering after retrieval
+
+`--overfetch` fetches the unfenced top N by HNSW (`ef_search = min(N, 1000)`, `iterative_scan = strict_order`, so
+N rows come back), keeps the reader's rows and returns the first 20. Every one of the N rows is fetched, as an
+application filtering a vector store's results must (the outer sort is on `distance + 0`, so the executor cannot stop
+at the 20th readable row). rows/k is over 100 queries; the last line of each reader is the fenced query with
+`relaxed_order`, for comparison.
+
+```
+p50 ms (rows/k) of fetch-N-then-filter, and the fenced query (relaxed_order)
+reader        |         N=20         N=40        N=100        N=200        N=400       N=1000       N=2000       N=4000 |        fence
+b0001 0.1%    |   2.2 (0.00)   3.3 (0.00)   6.2 (0.00)  10.7 (0.00)  19.5 (0.01)  44.3 (0.03)  56.9 (0.06)  73.7 (0.13) | 114.4 (0.74)
+b001 1.1%     |   2.3 (0.01)   3.5 (0.02)   6.7 (0.05)  11.3 (0.10)  19.2 (0.20)  44.7 (0.52)  52.3 (0.94)  70.3 (1.00) |  42.9 (1.00)
+b005 5.1%     |   2.2 (0.06)   3.3 (0.12)   6.7 (0.28)  11.0 (0.54)  20.1 (0.94)  43.2 (1.00)  53.6 (1.00)  70.4 (1.00) |  18.9 (1.00)
+b010 10%      |   2.2 (0.11)   3.7 (0.21)   6.6 (0.49)  11.3 (0.91)  19.9 (1.00)  40.8 (1.00)  48.5 (1.00)  70.4 (1.00) |  13.0 (1.00)
+b020 20%      |   2.9 (0.22)   4.5 (0.42)   7.3 (0.92)  12.9 (1.00)  21.0 (1.00)  45.1 (1.00)  51.1 (1.00)  74.5 (1.00) |   6.5 (1.00)
+b050 50%      |   1.9 (0.49)   4.1 (0.92)   6.7 (1.00)  12.8 (1.00)  22.2 (1.00)  44.6 (1.00)  58.1 (1.00)  68.1 (1.00) |   4.9 (1.00)
+p99 ms of fetch-N-then-filter, all readers pooled by N (max over readers): N=20 4, N=40 20, N=100 13, N=200 21, N=400 40, N=1000 94, N=2000 85, N=4000 115
+```
+
+What it shows:
+
+1. **Rows kept are about N x breadth / k**, as arithmetic says. With N = k = 20 a 5% reader kept 6% of k, a 10%
+   reader 11%; N = 40 (pgvector's default `ef_search`) roughly doubles that. The 128-dimension run's 8%, 20% and 62%
+   at 5%, 10% and 30% breadth are this effect inside the database: with `iterative_scan = off` the HNSW scan yields at
+   most `ef_search` = 40 candidates before the fence, so about 40 x breadth of them survive.
+2. **Filling k needs N of about k / breadth, and the cost grows with N.** Fetching N cost about 2 ms at N = 20, 11 to 13 ms at 200, 19 to 22 ms at 400,
+   41 to 45 ms at 1,000 and 68 to 75 ms at 4,000, whoever the reader. The smallest N that filled k was about 100 at
+   50% breadth (6.7 ms, against 4.9 ms fenced), 200 at 20% (12.9 against 6.5), 400 at 10% (19.9 against 13.0),
+   1,000 at 5% (43.2 against 18.9) and 4,000 at 1% (70.3 against 42.9). And the application must know each reader's
+   breadth to choose N: a fixed N either wastes the broad readers' time or silently starves the narrow ones.
+3. **Narrow readers have no N that works.** At 0.1% breadth, N = 4,000 kept 13% of k (73.7 ms). Filling k would take
+   N of about 20,000, beyond `ef_search`'s maximum of 1,000, so it rests on iterative scanning anyway. The fenced
+   ANN leg is no answer there either (114 ms, 0.74 of k); the exact path is (6.7 ms with full recall in the second
+   run), which `rebac.fenced_ids` (0.2.0, unreleased) chooses by itself.
+
+Limits: the same as the second run (synthetic embeddings, a warm cache, one node and tenant, `fsync = off`, one
+client), plus: the over-fetch rows were filtered inside Postgres, so no network transfer of N rows to an application
+is counted, which flatters it; and the over-fetched rows are HNSW's approximate top N, so their recall is not
+measured here.
+
 ## Recommendations
 
 - Fence an ANN leg with `container in (select * from rebac.readable_set(p))` and `set local hnsw.iterative_scan =

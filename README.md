@@ -118,7 +118,8 @@ production read is served by pg_rebac yet.
   - refreshes principals at least as fresh as the write that queued them;
   - backfills a tenant from ReadRelationships and LookupResources;
   - re-sends each recent revocation once from a sweep;
-  - follows Watch to count writes made outside pg_rebac (observe-only in slice 1);
+  - applies SpiceDB's Watch, so a revocation written straight to SpiceDB is narrowed as it is delivered, or reads
+    fail closed (G10; from 0.2.0, unreleased; in 0.1.x Watch only counts such writes and the sweep narrows them);
   - derives the relations that can change the permission from the SpiceDB schema itself, and refuses a schema it
     cannot narrow soundly;
   - re-derives them whenever the live schema changes: a change to what grants view fails every read closed
@@ -158,14 +159,16 @@ The projected permission, `container#view` by default, may be any union (`+`) of
 - direct relations;
 - a self-arrow (`parent->view`);
 - an arrow to another type and a relation there (`workspace->admin`);
-- subject sets one level deep (`group#member`, where `group#member` holds plain object types).
+- subject sets one level deep (`group#member`, where `group#member` holds plain object types);
+- wildcards (`user:*`) on a relation of the projected type, from 0.2.0 (unreleased): a wildcard grant refreshes
+  every principal of the tenant, and its removal narrows every holder of the container.
 
 Refused, each with its reason:
 
 - exclusion (`-`): removing a tuple can grant;
 - intersection (`&`, `.all()`);
 - caveats and expiring relationships;
-- wildcards;
+- wildcards on a relation reached through an arrow, or inside a subject set (in 0.1.x, every wildcard);
 - nested subject sets;
 - arrows more than one hop away.
 
@@ -178,7 +181,12 @@ and pgvector 0.8:
   `hnsw.iterative_scan = relaxed_order` is set.
 - Without it, the fence silently returns fewer than k rows.
 - Readers below about 1% breadth belong on the exact path, `container = any(array(select * from
-  rebac.readable_set(p)))`. Choose it with `rebac.breadth(p)`.
+  rebac.readable_set(p)))`. Choose it with `rebac.breadth(p)`, or let `rebac.fenced_ids(p, tbl, q, k)` choose.
+- `rebac.fenced_ids` (0.2.0, unreleased) counts the reader's candidate rows up to `exact_below_rows` (default
+  5,000) and sorts them exactly below it, or runs the fenced HNSW scan with `relaxed_order` above it. Measured on
+  the 128-dimension data (k = 20, p50), exact against ANN at 500 / 2,000 / 5,000 / 10,000 candidate rows: 4.9 / 8.3 /
+  14.2 / 20.9 ms against 85.7 / 25.1 / 10.8 / 6.1 ms, ANN recall 0.60 / 0.80 / 0.92 / 0.89. The crossover is at
+  4,000 to 5,000 candidate rows.
 
 ## Tests
 

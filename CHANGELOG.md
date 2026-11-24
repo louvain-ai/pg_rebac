@@ -2,6 +2,9 @@
 
 ## 0.2.0 (unreleased: versions in Cargo.toml, META.json and npm are bumped at release)
 
+- **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security
+  (the fence in a policy, a naive `exists` policy, a per-row check function) and filtering after retrieval (fetch the
+  unfenced top N, filter, keep 20) on the 768-dimension data. Results and method are in `docs/planner.md`.
 - **Revocations made outside `rebac.write` are applied from Watch (G10).** Watch was observe-only; a delete written
   straight to SpiceDB (another service, the `zed` CLI) waited for the sweep (15 minutes) or the freshness bound
   (one hour). `rebacd` now applies each Watch message in one transaction with its position (`rebac.apply_watch`):

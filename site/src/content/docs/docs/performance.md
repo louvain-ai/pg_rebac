@@ -84,6 +84,42 @@ table is in `docs/planner.md`.
   dimensions leaves neighbours nearly tied. Fenced recall tracked unfenced recall at the same `ef_search`, so the
   fence costs no recall of its own. The data cannot say more than that.
 
+## Row-level security and filtering after retrieval
+
+`examples/hybrid-pgvector-realistic/alternatives.py` measures both on the 768-dimension data, one client, warm
+cache. The method, the full tables and the plans are in `docs/planner.md`.
+
+**Row-level security.** The same reads, with the fence in a policy (`rebac.enable_rls`), in a naive
+`exists (select … from rebac.readable …)` policy, or in a policy calling the per-row check `rebac.readable_by`.
+Every form returned the same rows. p50 in ms:
+
+| Breadth | Shape | Query fence | `enable_rls` | `exists` policy | Per-row function |
+|---|---|---|---|---|---|
+| 0.1% | ANN top-20 | 122 | 52 | 49 | 423 |
+| 5% | ANN top-20 | 20 | 17 | 17 | 25 |
+| 50% | ANN top-20 | 6.0 | 5.8 | 5.3 | 5.4 |
+| 0.1% | `count(*)` | 0.6 | 17 | 46 | 3,417 |
+| 50% | `count(*)` | 32 | 28 | 70 | 3,449 |
+
+- A policy is planned as a filter on the scan (a hashed subplan over the reader's containers), not as a join. For
+  an ANN top-k that costs about the same; for a query that reads many rows it means scanning the whole table.
+- A per-row function costs a call per row it sees: about 7 µs here, locally. A remote permission check per row
+  would cost a round trip on top.
+
+**Filtering after retrieval.** Fetch the unfenced HNSW top N, keep the reader's rows, return 20:
+
+| Breadth | N that filled k | Its p50 ms | Fenced p50 ms |
+|---|---|---|---|
+| 50% | 100 | 6.7 | 4.9 |
+| 20% | 200 | 12.9 | 6.5 |
+| 10% | 400 | 19.9 | 13.0 |
+| 5% | 1,000 | 43.2 | 18.9 |
+| 1% | 4,000 | 70.3 | 42.9 |
+| 0.1% | none: N = 4,000 kept 13% of k | 73.7 | exact path |
+
+Rows kept are about N × breadth / k, so N must be chosen per reader, and a fixed N starves narrow readers silently.
+The filter ran inside Postgres, so no transfer of N rows to an application was counted, which flatters it.
+
 ## Write side: a refresh is a diff
 
 A refresh re-projects a principal from SpiceDB. `rebac.project` writes only the difference from the stored set,

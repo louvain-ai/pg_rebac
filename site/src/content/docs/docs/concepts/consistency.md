@@ -86,14 +86,15 @@ not read.
   default).
 - Narrowing only removes rows, so it never moves the time.
 
-Freshness bounds what reaches SpiceDB without `rebac.write`: another service, or the `zed` CLI. Those changes are
-picked up only by a re-projection, and the sweep re-projects everyone every `sweep_interval_ms` (15 minutes). Keep
-the bound above the sweep interval plus the time a sweep takes to drain.
+Freshness bounds what reaches SpiceDB without `rebac.write` (another service, or the `zed` CLI) when Watch is not
+applying it: in 0.1.x, or with `watch = false`. Those changes are then picked up only by a re-projection, and the
+sweep re-projects everyone every `sweep_interval_ms` (15 minutes). Keep the bound above the sweep interval plus the
+time a sweep takes to drain. From 0.2.0 (unreleased), with Watch on, G10 bounds them instead.
 
 `rebac.freshness()` reports, per tenant, the oldest lookup among its principals. That is the time through which the
 whole tenant reflects SpiceDB, which is in effect the last sweep's completion. `rebac.status()` reports relay lag
-and the Watch stream's age beside it. Neither feeds the bound: a slow relay only delays grants, and Watch observes
-without applying.
+and the Watch stream's age beside it. Neither feeds the freshness bound: a slow relay only delays grants. (From 0.2.0, a Watch stream that is
+down stops the heartbeat, so it fails reads closed through the liveness bound.)
 
 Set either bound to `0` to turn it off, for a deployment that projects from a static source. Rows written before
 an upgrade have no lookup time, and read as `RB503` until the sweep re-projects them.
@@ -110,11 +111,13 @@ an upgrade have no lookup time, and read as `RB503` until the sweep re-projects 
 | G6 | An unknown principal, a missing tenant, a daemon that is not live, a set too old or of unknown age, an unavailable lookup and an over-cap set each raise. None is an empty set, or a wider one. |
 | G7 | A set is read only while the SpiceDB lookup behind it began within `max_projection_age_ms`. Liveness is a separate bound. |
 | G8 | A change to what grants view in the live schema fails every read closed until every tenant is rebuilt under the new closure, and each principal looked up before it until it is re-projected. Noticed within `closure_check_ms` (10 s). |
+| G10 | From 0.2.0 (unreleased). A revocation made directly in SpiceDB leaves the projection within Watch's delivery plus one transaction (26 to 50 ms in one integration test, SpiceDB in memory on the same host), or every read fails closed: the stream down or a message unapplied stops the heartbeat (`RB503` within 5 s), and an unresumable position fails the principals looked up before it until re-projected. |
 
 ## Not guaranteed
 
-- **Writes not made through `rebac.write`**, by another service or the `zed` CLI, are counted on Watch and narrowed
-  by the sweep only. G2 does not cover them.
+- **Writes not made through `rebac.write`**, by another service or the `zed` CLI, are not in force at commit: G2 does
+  not cover them. From 0.2.0 (unreleased), G10 narrows them from Watch; in 0.1.x, and with `watch = false`, only the
+  sweep and the freshness bound (G7) do.
 - **The still-held rule** reads the outbox's net state, so it is exact only when every view relation is written
   through `rebac.write`.
 - **Caveats, expiring relationships and exclusion** are refused when the daemon starts, not evaluated.

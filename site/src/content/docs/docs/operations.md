@@ -39,8 +39,8 @@ What each one usually means:
   again.
 - `pending_outbox` growing: the relay is not delivering. Revocations are still in force locally; grants wait.
 - `quarantined` above zero: a write SpiceDB refuses on its own. The relay keeps going around it.
-- `external_writes` above zero: something writes SpiceDB directly. Those revocations are narrowed by the sweep, not
-  at commit.
+- `external_writes` above zero: something writes SpiceDB directly. Those revocations are not in force at commit.
+  From 0.2.0 (unreleased) they are narrowed from Watch as SpiceDB delivers them; in 0.1.x, by the sweep.
 
 ## Logs
 
