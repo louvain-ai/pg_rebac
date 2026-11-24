@@ -7,7 +7,8 @@ inside the Postgres plan, before the `order by` and the `limit`.
 
 - **Fenced ANN in 4 to 7 ms at 5% to 50% reader breadth**, all k rows at recall 0.90 to 0.96. That is p50 of 10
   queries, one client, on 500,000 synthetic 128-dimension passages with a warm cache. A 768-dimension run with
-  skewed containers took 3 to 29 ms (p99 5 to 61 ms), with concurrency measured too; see
+  skewed containers took 3 to 29 ms (p99 5 to 61 ms) at recall 0.09 to 0.23, on synthetic data where unfenced HNSW
+  scored 0.09 too, with concurrency measured as well; see
   [the studies and their limits](docs/planner.md).
 - **No remote authorisation call on a warm read.** A projected principal's fenced query reads local tables only.
   The first read of a principal asks the daemon once (`RB404`, then retry).

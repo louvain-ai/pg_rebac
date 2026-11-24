@@ -77,5 +77,9 @@ set local rebac.tenant = 'globex';
 select t.raises($$ select * from secret $$, 'RB422', 'changing the tenant after binding is refused');
 commit;
 select t.raises($$ select * from secret $$, 'RB400', 'the binding ended with its transaction');
+-- Binding writes, so it fails in a read-only transaction (and on a read replica): an error, never a wider read.
+begin read only;
+select t.raises($$ select rebac.set_principal('acme', 'lk') $$, '25006', 'binding is refused read-only');
+rollback;
 reset role;
 reset rebac.principal;

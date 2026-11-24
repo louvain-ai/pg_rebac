@@ -105,5 +105,20 @@ select rebac.write('touch', 'container:acme/i2', 'member', 'user:acme/ivy');
 commit;
 select t.ok(true, 'a grant under REPEATABLE READ is allowed (it narrows nothing)');
 
+-- 6. The relay re-narrows its claimed deletes and then holds its transaction across SpiceDB writes. It takes no tenant
+-- lock, so an arrow revocation is never held up by a relay waiting on SpiceDB.
+select rebac.project('acme', 'jo', array['j1'], 'tok');
+select rebac.write('delete', 'container:acme/j1', 'member', 'user:acme/jo');
+select rebac.write('touch', 'container:acme/file-3', 'parent', 'container:acme/space-9');
+select dblink_exec('a', 'begin');
+select * from dblink('a', format('select rebac.narrow_seqs(array[%s]::bigint[], false)::text',
+  (select max(seq) from rebac.outbox where resource = 'container:acme/j1'))) as x(v text);
+select dblink_send_query('b', $$ do $d$ begin perform set_config('rebac.tenant', 'acme', true);
+  perform rebac.write('delete', 'container:acme/file-3', 'parent', 'container:acme/space-9'); end $d$ $$);
+select t.eq(t.wait_blocked_or_done('b', (select pid from b_pid)), 'done', 'a relay mid-delivery does not hold an arrow revocation');
+select * from dblink_get_result('b') as x(s text);
+select * from dblink_get_result('b') as x(s text);
+select dblink_exec('a', 'commit');
+
 select dblink_disconnect('a');
 select dblink_disconnect('b');

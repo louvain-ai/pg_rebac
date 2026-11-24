@@ -762,7 +762,13 @@ begin
   -- cannot write the grant back afterwards. Sorted, and bounded, so this cannot deadlock against the daemon.
   perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
   for rec_p in select distinct tenant, principal from rebac_narrow_pairs order by tenant, principal loop
-    perform rebac.lock_principal(rec_p.tenant, rec_p.principal);
+    if hold_tenants then
+      perform rebac.lock_principal(rec_p.tenant, rec_p.principal);
+    else
+      -- The relay's re-narrowing only removes rows, so it takes no tenant lock at all: it must never hold up an
+      -- arrow or set-grant revocation while its transaction waits on SpiceDB.
+      perform pg_advisory_xact_lock(hashtextextended('rebac:' || rec_p.tenant || ':' || rec_p.principal, 0));
+    end if;
   end loop;
   perform set_config('lock_timeout', prior, true);
 

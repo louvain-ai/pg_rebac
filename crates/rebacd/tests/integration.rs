@@ -661,4 +661,63 @@ async fn the_daemon_end_to_end() {
             .contains(&"vdoc".to_string()),
         "the relation that left the closure no longer grants"
     );
+
+    // SHADOW MODE (how a shadow deployment runs): a closure change rebuilds the shadow projection, and never touches
+    // the live closure state, the live projection or the mirrors.
+    let shadow = Ctx::connect(config("REBAC_IT_DB", &endpoint, Mode::Shadow))
+        .await
+        .unwrap();
+    let snapshot = "select (select state || '@' || changed_at::text from rebac.closure_state),
+                (select count(*) from rebac.readable), (select count(*) from rebac.edge),
+                (select count(*) from rebac.set_grant)";
+    let before = c.query_one(snapshot, &[]).await.unwrap();
+    let before: (String, i64, i64, i64) =
+        (before.get(0), before.get(1), before.get(2), before.get(3));
+    s.write_schema(&with_viewer, Duration::from_secs(5))
+        .await
+        .unwrap();
+    s.write(
+        &[op(true, "container:acme/vdoc", "viewer", "user:acme/ana")],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        closure::recheck(&shadow).await.unwrap(),
+        closure::Recheck::Rebuilt
+    );
+    let after = c.query_one(snapshot, &[]).await.unwrap();
+    let after: (String, i64, i64, i64) = (after.get(0), after.get(1), after.get(2), after.get(3));
+    assert_eq!(
+        before, after,
+        "shadow mode leaves the live closure state, projection and mirrors alone"
+    );
+    let shadow_ana: Vec<String> = c
+        .query(
+            "select container from rebac.readable_shadow where tenant = 'acme' and principal = 'ana'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert!(
+        shadow_ana.contains(&"vdoc".to_string()),
+        "shadow mode rebuilt the shadow under the new closure"
+    );
+    // Put the store and the live closure back.
+    s.write(
+        &[op(false, "container:acme/vdoc", "viewer", "user:acme/ana")],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    s.write_schema(SCHEMA, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        closure::recheck(&ctx).await.unwrap(),
+        closure::Recheck::Rebuilt
+    );
 }

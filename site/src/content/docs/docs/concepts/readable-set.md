@@ -124,6 +124,9 @@ binding ends with the transaction. `tests/sql/12_rls.sql` checks each of these.
 The boundary holds for a role that logs in as itself. `SET ROLE` is reversible: SQL running in a session whose login
 role is trusted can `RESET ROLE` and bind any principal. Give the untrusted code its own login.
 
+Binding writes a row, so it is refused in a read-only transaction and on a read replica. Use the setting form there,
+from a trusted role.
+
 A table fenced by an earlier version of `enable_rls` keeps its permissive policy until you run `enable_rls` on it
 again.
 

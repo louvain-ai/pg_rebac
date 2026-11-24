@@ -21,7 +21,8 @@
    principal, from before it asks SpiceDB until it commits. So a refresh in flight commits before the holders are read
    (and its row is narrowed), and a refresh that starts later waits for the commit (and subtracts the revocation as
    pending). `tests/sql/09_revocation_race.sql` drives both orders. The cost: such a revocation waits for every refresh
-   of its tenant in flight, within `narrow_lock_timeout_ms`.
+   of its tenant in flight, within `narrow_lock_timeout_ms`. The relay's own re-narrowing of the deletes it
+   delivers takes no tenant lock, so a relay waiting on SpiceDB never holds such a revocation up.
 
    **G2 needs READ COMMITTED** (the Postgres default). Under REPEATABLE READ or SERIALIZABLE the commit-time delete reads
    the transaction's first snapshot, which cannot see a refresh that committed after it, so `rebac.write` refuses a
