@@ -1269,6 +1269,11 @@ declare n integer;
 begin
   select count(*) into n from (
     select distinct p.principal from unnest(subjects) s cross join lateral rebac.principals_of(t, s) as p(principal)
+    union
+    -- A wildcard among them (user:*) names nobody: everyone the tenant knows may view it.
+    select x.principal from (select ps.principal from rebac.principal_state ps where ps.tenant = t and ps.state <> 'retired'
+                             union select su.principal from rebac.subject su where su.tenant = t) x
+    where exists (select 1 from unnest(subjects) s where rebac.obj_id(s) = '*')
   ) x, lateral (select rebac.enqueue_refresh(t, x.principal, 1::smallint, token)) y;
   delete from rebac.refresh_resource where tenant = t and resource = res and generation = gen;
   update rebac.refresh_resource set leased_until = null where tenant = t and resource = res;
@@ -1392,8 +1397,9 @@ begin
     end if;
     perform rebac.queue_refreshes(seqs, '');
   end if;
+  -- A shadow daemon keeps its own position, so it can never move (or keep fresh) the one the live daemon applies.
   insert into rebac.watch_state (scope, zedtoken, external_writes, watched_at)
-  values ('watch_applied', token, n_ext, now())
+  values (case when apply then 'watch_applied' else 'watch_shadow' end, token, n_ext, now())
   on conflict (scope) do update set zedtoken = coalesce(excluded.zedtoken, rebac.watch_state.zedtoken),
     external_writes = rebac.watch_state.external_writes + excluded.external_writes, watched_at = now();
   return query select n_ext, n_narrowed;
@@ -1407,6 +1413,9 @@ language sql volatile as $$
   values ('watch_applied', token, now(), clock_timestamp())
   on conflict (scope) do update set zedtoken = excluded.zedtoken, watched_at = now(), gap_at = clock_timestamp();
   update rebac.sweep_claim set last_at = now() - interval '1 year';
+  -- A refresh already queued at a token could be served from before the gap: every one runs fully consistent, and one
+  -- in flight runs again.
+  update rebac.refresh set zedtoken = '', generation = generation + 1;
 $$;
 
 -- The stream is connected and every change it delivered is applied: the applied position is current as of now.

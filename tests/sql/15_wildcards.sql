@@ -41,3 +41,11 @@ select rebac.apply_watch(array['touch'], array['container:acme/wiki'], array['me
 select t.ok(exists (select 1 from rebac.refresh where principal = 'bo'), 'an external wildcard grant refreshes everyone');
 select rebac.apply_watch(array['delete'], array['container:acme/wiki'], array['member'], array['user:*'], 'z4');
 select t.eq(t.set_of('bo'), '{}'::text[], 'an external wildcard removal narrows every holder');
+
+-- A resource whose viewers include a wildcard (an arrow changed on it): LookupSubjects returns user:*, so everyone the
+-- tenant knows is refreshed.
+delete from rebac.refresh;
+delete from rebac.refresh_resource; insert into rebac.refresh_resource (tenant, resource, generation) values ('acme', 'container:acme/handbook', 1);
+select rebac.complete_refresh_resource('acme', 'container:acme/handbook', 1, array['user:*'], 'z5');
+select t.eq((select array_agg(principal order by principal) from rebac.refresh), array['ana', 'bo', 'cy'],
+            'a wildcard among a resource''s viewers refreshes everyone');

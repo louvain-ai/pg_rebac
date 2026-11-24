@@ -249,14 +249,23 @@ pub fn position_refused(s: &tonic::Status) -> bool {
     )
 }
 
+/// Where this daemon keeps its Watch position: a shadow daemon never moves the live one's.
+fn scope(ctx: &Ctx) -> &'static str {
+    match ctx.config.mode {
+        Mode::Live => "watch_applied",
+        Mode::Shadow => "watch_shadow",
+    }
+}
+
 /// The position to resume from, or None when it must restart from head.
 async fn resume_position(ctx: &Ctx) -> anyhow::Result<Option<String>> {
     let c = ctx.pool.get().await?;
+    let sc = scope(ctx);
     let row = c
         .query_opt(
             "select zedtoken, coalesce(extract(epoch from (now() - watched_at)) * 1000, 'infinity')::float8
-             from rebac.watch_state where scope = 'watch_applied'",
-            &[],
+             from rebac.watch_state where scope = $1",
+            &[&sc],
         )
         .await?;
     Ok(match row {
@@ -366,7 +375,7 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
     loop {
         let msg = tokio::select! {
             m = stream.message() => m,
-            _ = alive.tick(), if !first => {
+            _ = alive.tick(), if !first && apply => {
                 // Connected, and everything delivered is applied: the position is current as of now.
                 ctx.pool.get().await?.execute("select rebac.watch_alive()", &[]).await?;
                 continue;
@@ -432,8 +441,8 @@ async fn drop_position(ctx: &Ctx, e: &tonic::Status) -> anyhow::Result<Resume> {
         .get()
         .await?
         .execute(
-            "update rebac.watch_state set zedtoken = null where scope = 'watch_applied'",
-            &[],
+            "update rebac.watch_state set zedtoken = null where scope = $1",
+            &[&scope(ctx)],
         )
         .await?;
     Ok(Resume::Reset)

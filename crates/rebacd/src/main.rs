@@ -181,6 +181,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(ctx: Arc<Ctx>) -> anyhow::Result<()> {
+    // A Watch position before any loop projects anything, so a first start's gap precedes every lookup of this run.
+    if let Err(e) = loops::ensure_watch_position(&ctx).await {
+        tracing::warn!(error = %rebacd::logs::kind_of(&e), "could not store a Watch position at start; the Watch loop retries");
+    }
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let mut tasks = vec![
         (

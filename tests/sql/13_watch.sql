@@ -83,11 +83,15 @@ select rebac.project('acme', 'hal', array['space-1'], 't', 'live', now());
 select t.eq((select external from rebac.apply_watch(array['delete'], array['container:acme/space-1'], array['member'],
              array['user:acme/hal'], 'z13', false)), 1, 'counted');
 select t.eq(t.set_of('hal'), array['space-1'], 'not applied');
+select t.eq((select zedtoken from rebac.watch_state where scope = 'watch_applied'), 'z12', 'the live position did not move');
+select t.eq((select zedtoken from rebac.watch_state where scope = 'watch_shadow'), 'z13', 'shadow keeps its own');
 
 -- 7. THE GAP: Watch restarted from head. Every set looked up before it fails closed until it is re-projected.
 select rebac.project('acme', 'ivy', array['space-1'], 't', 'live', now() - interval '1 second');
 insert into rebac.sweep_claim (id, last_at) values (true, now()) on conflict (id) do update set last_at = now();
+select rebac.enqueue_refresh('acme', 'ivy', 2::smallint, 'old');
 select rebac.watch_restarted('head');
+select t.eq((select zedtoken from rebac.refresh where principal = 'ivy'), '', 'a refresh queued before the gap runs fully consistent');
 select t.raises($$ select * from rebac.readable_set('ivy') $$, 'RB503', 'looked up before the gap: closed');
 select t.ok((select last_at < now() - interval '1 day' from rebac.sweep_claim), 'the sweep is forced');
 select rebac.project('acme', 'ivy', array['space-1'], 't', 'live', clock_timestamp());

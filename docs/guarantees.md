@@ -107,7 +107,8 @@
 
     **The bound.** While the stream is connected, a revocation made directly in SpiceDB leaves the projection within
     the time SpiceDB's Watch takes to deliver it plus one `apply_watch` transaction. (Measured once in the integration
-    test, SpiceDB in memory on the same host: 26 to 50 ms from the WriteRelationships reply to the row being gone.
+    test, SpiceDB in memory on the same host: 26 to 70 ms over three runs, from the WriteRelationships reply to the
+    row being gone.
     pg_rebac does not bound SpiceDB's delivery itself.) Otherwise reads fail closed:
     - **The stream is down, or a message cannot be applied** (a lock not taken within `narrow_lock_timeout_ms`): the
       daemon stops beating the heartbeat, so every read is `RB503` within `max_staleness_ms` (5 s), plus the
@@ -123,11 +124,14 @@
       without an error and silently skip what it collected (observed with the in-memory datastore and a 2 s window).
       The stream restarts from SpiceDB's head and records `gap_at`: every principal looked up before it is `RB503`
       until it is re-projected, and the sweep is forced at once to do that (`POST /lookup` re-projects one sooner).
-      `rebacd backfill` stores a position before it projects anything, so a daemon started after it needs no gap.
+      Every refresh already queued is re-queued fully consistent, so none is served from before the gap.
+      `rebacd backfill` and `rebacd run` store a position before they project anything, so the gap on a first start
+      precedes every lookup it makes.
 
     With several daemons, each applies Watch and each beats only while its own stream is applying; reads stay open
     while any one of them beats. A store that cannot serve Watch fails every read closed with Watch on: set
-    `watch = false` there, and G7's sweep bound applies instead. In shadow mode Watch only counts.
+    `watch = false` there, and G7's sweep bound applies instead. In shadow mode Watch only counts, under its own position
+    (`watch_shadow`), so a shadow daemon never moves the live one's.
 
 ## Not guaranteed
 
