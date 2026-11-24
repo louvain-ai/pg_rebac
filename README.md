@@ -215,6 +215,11 @@ cargo build --release -p rebacd
 DATABASE_URL=postgres://… SPICEDB_TOKEN=… ./target/release/rebacd --config rebac.toml run
 ```
 
+The install needs a role that can create a schema (a database owner is enough) and no superuser. Through PgBouncer
+in transaction mode, set `rebac.tenant` and `rebac.principal` with `set local`; connect `rebacd` directly or through a
+session-mode pooler. [Getting started](https://pgrebac.com/docs/getting-started/#install-the-sql) lists the daemon
+role's grants.
+
 TLS to Postgres follows the connection string's `sslmode`, with libpq's meanings:
 
 - `verify-full` checks the chain (the public roots, or `sslrootcert=<pem file>`) and the host name. Use it for a

@@ -30,6 +30,11 @@
 - **Docs.** The FAQ answers outages, freshness and zedtokens, RLS bypasses, open transactions after a revocation,
   upgrades and maintenance; NOTICE names the vendored protos' copyright holders.
 
+- **CI: through PgBouncer in transaction mode** (`tests/pooler/run.sh`): a session `SET` leaks to the next client and
+  `SET LOCAL` does not; a fenced read, a revocation at commit and `set_principal` work through it. **And as on hosted
+  Postgres**: the install beside the usual extensions, re-run over itself, and the daemon's calls as a role with
+  privileges on schema `rebac` only. Getting started documents both.
+
 ## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security

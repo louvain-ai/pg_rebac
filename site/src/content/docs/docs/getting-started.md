@@ -93,6 +93,31 @@ await migrate((text) => client.query(text)); // node-postgres; postgres.js: (tex
 
 Running it again is safe: tables are created `if not exists` and functions are replaced.
 
+**What the install needs.** The role that runs it must be able to create a schema in the database: the database's
+owner is enough, and no superuser is needed. pgvector is needed only for fenced vector search, and on hosted Postgres
+it is created by the provider's console or an administrator, as for any extension. CI installs as a non-superuser
+owner on Postgres 14 to 17, with and without pgvector, beside `pg_stat_statements`, `pgcrypto`, `pg_trgm`, `citext`,
+`uuid-ossp` and `btree_gin`, and re-runs the install over itself.
+
+**The daemon's role** needs privileges on the schema `rebac` only, and CI runs the daemon's calls as such a role:
+
+```sql
+create role rebacd login password '…';
+grant usage on schema rebac to rebacd;
+grant select, insert, update, delete on all tables in schema rebac to rebacd;
+grant usage, select on all sequences in schema rebac to rebacd;
+grant execute on all functions in schema rebac to rebacd;
+```
+
+Re-run the grants after an upgrade that adds tables or functions.
+
+**Connection poolers.** Applications can read through PgBouncer in transaction mode; CI runs that with one shared
+server connection. Set `rebac.tenant` and `rebac.principal` with `set local` (or `set_config(..., true)`) inside the
+transaction that reads: a session-level `set` stays on the server connection and is seen by the next client the pooler
+hands it to. `rebac.set_principal`'s binding ends with its transaction, so it is safe there. Connect `rebacd` to
+Postgres itself or through a pooler in session mode: its leader lock is a session advisory lock, and through a
+transaction pooler that lock belongs to whichever server connection took it.
+
 ## A first readable set
 
 In a deployment, the `rebacd` daemon fills the projection from SpiceDB and heartbeats. Reads fail closed when the

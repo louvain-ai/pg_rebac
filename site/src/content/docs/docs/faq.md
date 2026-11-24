@@ -129,6 +129,13 @@ Louvain builds and maintains pg_rebac and runs it in its own product. It is Apac
 signed off under the Developer Certificate of Origin (`git commit -s`), so the licence of every line stays Apache-2.0.
 Report a vulnerability privately, as `SECURITY.md` describes.
 
+## Does it work on RDS, Cloud SQL, Neon or Supabase, and behind PgBouncer?
+
+It needs a role that can create a schema (a database owner; no superuser), PL/pgSQL, and pgvector only for vector
+search; [what the install needs](/docs/getting-started/#install-the-sql) lists the privileges and the daemon's own
+role. Applications can read through PgBouncer in transaction mode with `set local`; `rebacd` connects directly or
+through a session-mode pooler.
+
 ## Does it need a C extension?
 
 No. It is plain SQL and PL/pgSQL, installed with `psql -f`, so it runs on hosted Postgres that does not allow

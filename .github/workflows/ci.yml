@@ -61,6 +61,23 @@ jobs:
       - name: revocation vs refresh races, 20 rounds
         run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' && tests/sql/run.sh '13_*' || exit 1; done
 
+  # THROUGH A POOLER: PgBouncer in transaction mode with one server connection, so every client shares a backend. A
+  # session SET leaks and SET LOCAL does not; a fenced read, a revocation at commit and set_principal work through it.
+  pooler:
+    name: through PgBouncer, transaction mode
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: rebac
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 1s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: REBAC_TEST_URL=postgres://postgres:rebac@127.0.0.1:55433 tests/pooler/run.sh
+
   integration:
     name: rebacd against SpiceDB
     runs-on: ubuntu-latest
