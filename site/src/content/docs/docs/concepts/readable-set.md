@@ -84,6 +84,9 @@ The fence is a `RESTRICTIVE` policy, so it is ANDed with every other policy on t
 widen it, whether yours or added later. Postgres returns nothing through restrictive policies alone, so:
 
 - If the table has no permissive `SELECT` policy, `enable_rls` adds `rebac_base` (`using (true)`) beside the fence.
+- It warns about every role and view that reads the table without the fence (a superuser, `BYPASSRLS`, an owner
+  without FORCE, a view without `security_invoker`, a materialized view); `rebac.rls_bypasses(table)` lists them
+  at any time.
   A permissive policy you add after that is ORed with `rebac_base`, so it no longer narrows anything. Write your own
   narrowing as `RESTRICTIVE` too, or drop `rebac_base`.
 - If the table has permissive policies of its own, a row must pass one of them and the fence.
