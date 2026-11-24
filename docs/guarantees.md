@@ -12,13 +12,20 @@
    - direct relations;
    - the relations reached through an arrow (`workspace->admin`);
    - memberships of subject sets.
-   If a principal's lock cannot be taken within `narrow_lock_timeout_ms`, the COMMIT fails; it never commits an
-   unnarrowed revocation.
+   If a lock cannot be taken within `narrow_lock_timeout_ms`, the COMMIT fails; it never commits an unnarrowed
+   revocation.
 
    Two kinds of removal narrow EVERYONE who holds a container: an arrow tuple (a file leaving its space) and a grant to
-   a subject set. For those, the holders are read before their locks are taken. A refresh that wrote its row before
-   the revoking commit, and committed after that read, keeps the container until the relay claims the row and narrows
-   again. So for these two the promise is "at commit, or at the relay's next pass".
+   a subject set. They name no principal, so the trigger holds the TENANT exclusively before it reads who the holders
+   are. Every projection writer (a refresh, a lazy first read, a retirement) holds its tenant shared, then its
+   principal, from before it asks SpiceDB until it commits. So a refresh in flight commits before the holders are read
+   (and its row is narrowed), and a refresh that starts later waits for the commit (and subtracts the revocation as
+   pending). `tests/sql/09_revocation_race.sql` drives both orders. The cost: such a revocation waits for every refresh
+   of its tenant in flight, within `narrow_lock_timeout_ms`.
+
+   **G2 needs READ COMMITTED** (the Postgres default). Under REPEATABLE READ or SERIALIZABLE the commit-time delete reads
+   the transaction's first snapshot, which cannot see a refresh that committed after it, so `rebac.write` refuses a
+   view revocation there with `RB422`. Grants are allowed at any isolation level.
 
    G2 for arrows, via relations and sets also needs `edge` and `set_grant` to be complete. Every such write must go
    through `write`, or the tenant must have been backfilled.
@@ -44,6 +51,8 @@
   through `rebac.write`.
 - **Caveats, expiring relationships and exclusion** are refused at start, not evaluated.
 - **A read replica** holds G2 only once its replay has passed the commit.
+- **Projection rows written by anything but `rebac.project`** (an application's own mirror into `rebac.readable`) do
+  not take the lock order, so G2's race argument does not cover them.
 
 ## Where slice 1 differs from the design document
 

@@ -247,11 +247,31 @@ language sql stable as $$
     and strpos(subj, '#') = 0
 $$;
 
--- One writer per (tenant, principal): a refresh, a lazy first read and a narrowing all take it before asking SpiceDB.
+-- THE LOCK ORDER, for every writer of the projection: the TENANT first, then the PRINCIPAL.
+--   * A refresh, a lazy first read, a retirement and a narrowing that names its principals take the tenant SHARED, then
+--     the principal's own lock exclusively (rebac.lock_principal), before asking SpiceDB, until they commit.
+--   * A narrowing that removes an arrow tuple or a grant to a subject set names nobody: it narrows every holder of the
+--     container. It takes the tenant EXCLUSIVELY (rebac.lock_tenant) before it reads who the holders are, so every
+--     refresh of that tenant in flight has committed (and its row is visible to the read), and every refresh after it
+--     waits for its commit (and then sees the revocation pending in the outbox).
+-- Tenant locks use the two-key advisory space and principal locks the one-key space, so the two never collide.
+-- Tenants are always locked in sorted order, then principals in sorted order: no two writers wait on each other.
+create or replace function rebac.lock_tenant(t text, exclusive boolean default false) returns void
+language plpgsql volatile as $$
+begin
+  if exclusive then
+    perform pg_advisory_xact_lock(1919050595, hashtext(t));
+  else
+    perform pg_advisory_xact_lock_shared(1919050595, hashtext(t));
+  end if;
+end $$;
+
 create or replace function rebac.lock_principal(t text, p text) returns void
-language sql volatile as $$
-  select pg_advisory_xact_lock(hashtextextended('rebac:' || t || ':' || p, 0))
-$$;
+language plpgsql volatile as $$
+begin
+  perform rebac.lock_tenant(t, false);
+  perform pg_advisory_xact_lock(hashtextextended('rebac:' || t || ':' || p, 0));
+end $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
 -- The read side.
@@ -514,6 +534,16 @@ begin
      or rebac.strip(t, split_part(rebac.obj_id(subject), '#', 1)) is null then
     raise exception 'rebac.write: a reference does not carry this tenant''s prefix' using errcode = 'RB422';
   end if;
+  -- A revocation is narrowed at commit by deleting rows that a refresh may have committed a moment earlier. Under
+  -- REPEATABLE READ or SERIALIZABLE that delete reads the transaction's first snapshot and cannot see such a row, so
+  -- it would commit un-narrowed: refused, never weakened.
+  if op = 'delete' and current_setting('transaction_isolation') <> 'read committed'
+     and exists (select 1 from rebac.view_relation vr
+                 where vr.resource_type = rebac.obj_type(resource) and vr.relation = write.relation) then
+    raise exception 'rebac.write: a revocation must commit under READ COMMITTED (this transaction is %)',
+      current_setting('transaction_isolation')
+      using errcode = 'RB422', hint = 'write revocations in a READ COMMITTED transaction (the Postgres default)';
+  end if;
   insert into rebac.outbox (tenant, op, resource, relation, subject)
   values (t, op, resource, relation, subject) returning outbox.seq into new_seq;
 
@@ -538,11 +568,14 @@ begin
   return new_seq;
 end $$;
 
--- Narrow every revocation among these outbox rows (net per relationship, latest seq wins), under the affected
--- principals' locks taken in sorted order. Returns the number of projection rows removed. The commit trigger calls it
--- with this transaction's rows; the relay calls it again with the rows it claims, which is a no-op when the writing
--- transaction already narrowed, and the safety net when it did not.
-create or replace function rebac.narrow_seqs(seqs bigint[]) returns integer
+-- Narrow every revocation among these outbox rows (net per relationship, latest seq wins), under the lock order above.
+-- Returns the number of projection rows removed. The commit trigger calls it with this transaction's rows and
+-- `hold_tenants` true; the relay calls it again with the rows it claims and `hold_tenants` false, which is a no-op when
+-- the writing transaction already narrowed, and the safety net when it did not. (The relay's rows are committed, so a
+-- refresh reads them as pending and needs no tenant lock to be kept from regrowing them; and the relay holds its
+-- transaction across SpiceDB writes, which must not stall every refresh of a tenant.)
+drop function if exists rebac.narrow_seqs(bigint[]);
+create or replace function rebac.narrow_seqs(seqs bigint[], hold_tenants boolean default true) returns integer
 language plpgsql volatile as $$
 declare
   removed integer := 0;
@@ -552,9 +585,40 @@ declare
   prior text := current_setting('lock_timeout');
 begin
   if seqs is null or cardinality(seqs) = 0 then return 0; end if;
+  if current_setting('transaction_isolation') <> 'read committed' and exists (
+       select 1 from rebac.outbox o join rebac.view_relation v
+         on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation
+       where o.seq = any(seqs) and o.op = 'delete') then
+    raise exception 'rebac: a revocation must be narrowed under READ COMMITTED (this transaction is %)',
+      current_setting('transaction_isolation') using errcode = 'RB422';
+  end if;
   create temp table if not exists rebac_narrow_pairs (tenant text, principal text, container text)
     on commit drop;
   truncate rebac_narrow_pairs;
+  create temp table if not exists rebac_narrow_holders (tenant text, container text) on commit drop;
+  truncate rebac_narrow_holders;
+
+  -- An arrow, or a grant to a subject set, removed: everyone who holds the container loses it. Who holds it is read
+  -- only AFTER the tenant is held exclusively (below).
+  insert into rebac_narrow_holders (tenant, container)
+  with net as (
+    select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
+    from rebac.outbox where seq = any(seqs)
+    order by resource, relation, subject, seq desc
+  )
+  select distinct d.tenant, rebac.strip(d.tenant, rebac.obj_id(d.resource))
+  from net d join rebac.view_relation v
+    on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
+   and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
+  where d.op = 'delete' and v.resource_type = root;
+
+  perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
+  if hold_tenants then
+    for rec_p in select distinct tenant from rebac_narrow_holders order by tenant loop
+      perform rebac.lock_tenant(rec_p.tenant, true);
+    end loop;
+  end if;
+  perform set_config('lock_timeout', prior, true);
 
   with net as (
     select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
@@ -585,13 +649,6 @@ begin
     join rebac.edge e on e.tenant = d.tenant and e.relation = v.through
       and e.parent = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource))
   ),
-  arrow as (  -- an arrow, or a grant to a subject set, removed: everyone who holds the container loses it
-    select d.tenant, rebac.strip(d.tenant, rebac.obj_id(d.resource)) as container
-    from del d join rebac.view_relation v
-      on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
-     and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
-    where v.resource_type = root
-  ),
   membership as (  -- a member leaves a subject set: they lose what the set was granted
     select d.tenant, d.subject, g.container
     from del d join rebac.view_relation v
@@ -609,8 +666,9 @@ begin
   select x.tenant, p, x.container
   from membership x cross join lateral rebac.principals_of(x.tenant, x.subject) p
   union
+  -- a new statement, so a new snapshot: it sees every refresh that committed while the tenant lock was awaited
   select r.tenant, r.principal, r.container
-  from arrow a join rebac.readable r on r.tenant = a.tenant and r.container = a.container;
+  from rebac_narrow_holders a join rebac.readable r on r.tenant = a.tenant and r.container = a.container;
 
   -- Everything under a lost container through self-arrows goes with it (a space's shared files).
   with recursive closure(tenant, principal, container) as (

@@ -126,9 +126,9 @@ const description =
               up.
             </p>
             <p class="scope">
-              Exact for direct relations, arrows to another type, and subject-set memberships. Removing an arrow or
-              a grant to a set narrows at commit or at the relay's next pass. Writes made outside
-              <code>rebac.write</code> are narrowed by the sweep. <a href="/docs/concepts/consistency/">What is
+              Exact for direct relations, arrows and subject sets, including a refresh that races the commit, in a
+              READ COMMITTED transaction (the Postgres default). Writes made outside <code>rebac.write</code> are
+              narrowed by the sweep. <a href="/docs/concepts/consistency/">What is
               guaranteed</a>
             </p>
           </article>

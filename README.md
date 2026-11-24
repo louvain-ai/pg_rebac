@@ -88,7 +88,9 @@ Slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tes
   - A missing `rebac.tenant` is `RB400`. None of these is ever an empty set by accident.
 - **Revocations in force at commit.** Write relationships with `rebac.write(op, resource, relation, subject)` in
   your own transaction. A deferred trigger removes every revocation it queued from the projection before the
-  transaction commits, whether or not SpiceDB or the daemon is up.
+  transaction commits, whether or not SpiceDB or the daemon is up. This holds for direct relations, arrows and
+  subject sets, including a refresh racing the commit, and needs READ COMMITTED: a revocation in a REPEATABLE READ
+  or SERIALIZABLE transaction is refused (`RB422`). See [`docs/guarantees.md`](docs/guarantees.md).
 - **A staleness bound.** Reads fail closed (`RB503`) once the daemon has not heartbeated for `max_staleness_ms`
   (default 5000). The daemon beats only while it can reach both SpiceDB and Postgres.
 - **The daemon, `rebacd`.** It:

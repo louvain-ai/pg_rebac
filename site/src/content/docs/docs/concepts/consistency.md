@@ -24,8 +24,9 @@ What the trigger does, in order:
 2. It skips a delete whose subject still holds view through another relation, by the outbox's net state. A
    demotion from editor to member is not a revocation.
 3. It resolves subjects to principals and follows mirrored arrow edges, so a container's children go with it.
-4. It takes the principals' locks in sorted order, bounded by `narrow_lock_timeout_ms` (5,000 by default). If a
-   lock cannot be taken in time, the COMMIT fails. It never commits an unnarrowed revocation.
+4. It takes the locks in a fixed order, bounded by `narrow_lock_timeout_ms` (5,000 by default): the tenant
+   exclusively when the removal names no principal (below), then each principal in sorted order. If a lock cannot
+   be taken in time, the COMMIT fails. It never commits an unnarrowed revocation.
 5. It deletes the rows and bumps each principal's `rebac.version`.
 
 Functions registered in `rebac.narrow_hook` run inside the same transaction with the tenant and the containers that
@@ -40,9 +41,16 @@ At commit, exactly, for:
 - memberships of subject sets (`group#member@user:…`).
 
 Two removals narrow everyone who holds a container: an arrow tuple (a file leaving its folder) and a grant to a
-subject set. Their holders are read before their locks are taken, so a refresh that raced the read can keep the
-container until the relay claims the row and narrows again. For those two the promise is at commit, or at the
-relay's next pass.
+subject set. They name no principal, so the trigger holds the tenant exclusively and only then reads who the holders
+are. Every refresh holds its tenant shared from before its SpiceDB call until it commits. A refresh already in
+flight therefore commits first and is narrowed; one that starts later waits and then subtracts the revocation as
+pending. Such a revocation waits for the tenant's refreshes in flight, within `narrow_lock_timeout_ms`.
+
+### READ COMMITTED only
+
+The commit-time delete must see a refresh that committed a moment earlier. Under REPEATABLE READ or SERIALIZABLE it
+reads the transaction's first snapshot and cannot, so `rebac.write` refuses a view revocation in such a transaction
+with `RB422`. Grants are accepted at any isolation level. READ COMMITTED is the Postgres default.
 
 Arrow, via and set narrowing needs the local edge and set-grant tables to be complete: every such write goes
 through `rebac.write`, or the tenant has been backfilled.
@@ -74,7 +82,7 @@ wait on it; the bound exists so grants and external writes cannot fall arbitrari
 | | Guarantee |
 |---|---|
 | G1 | Every row a query fenced by `rebac.readable_set` returns lies in a container the projection holds for that tenant and principal, at the query's snapshot. No row is returned unless the principal's check passed. |
-| G2 | A view revocation written through `rebac.write` is absent from the projection when the writing transaction commits, as scoped above. |
+| G2 | A view revocation written through `rebac.write` in a READ COMMITTED transaction is absent from the projection when that transaction commits, as scoped above, including against a refresh that races it. |
 | G3 | No refresh can restore a container whose revocation is pending in the outbox, or anything for a retired principal. |
 | G4 | A refresh queued by a delivery is looked up at least as fresh as the token that delivery was written at. |
 | G5 | Every key carries the tenant. A reference with another tenant's prefix is refused by `rebac.write`, maps to nobody, and is dropped from a lookup. |

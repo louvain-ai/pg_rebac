@@ -98,7 +98,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     // Revocations narrow again at claim: a no-op when their transaction narrowed, the safety net when it did not.
     let deletes: Vec<i64> = rows.iter().filter(|r| !r.op.touch).map(|r| r.seq).collect();
     let narrowed: i32 = tx
-        .query_one("select rebac.narrow_seqs($1)", &[&deletes])
+        .query_one("select rebac.narrow_seqs($1, false)", &[&deletes])
         .await?
         .get(0);
 
