@@ -343,7 +343,7 @@ begin
           using errcode = 'RB503',
                 hint = 'rebac_not_fresh: the daemon''s sweep re-projects everyone; POST /lookup re-projects one now';
       end if;
-      if cl.changed_at is not null and st.looked_up_at < cl.changed_at then
+      if cl.changed_at > '-infinity' and (st.looked_up_at is null or st.looked_up_at < cl.changed_at) then
         raise exception 'rebac: this principal was projected before the schema''s closure last changed'
           using errcode = 'RB503', hint = 'rebac_closure: it is re-projected by the rebuild, the sweep or POST /lookup';
       end if;

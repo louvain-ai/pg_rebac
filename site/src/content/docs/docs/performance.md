@@ -70,8 +70,8 @@ tuple, no index entry and no WAL. Measured with `examples/project-churn/churn.sq
   | Delete everything, reinsert (before) | 12.1 s | 395 MB | 1,000,000 | 1,000,000 |
   | Diff (now) | 7.5 s | 8.8 MB | 10,000 | 10,000 |
 
-- **The cost that remains.** A refresh still reads the principal's whole set from SpiceDB and compares it with the
-  stored one. That read and comparison is most of the 7.5 s.
+- **The cost that remains.** A refresh still reads the principal's whole set and compares it with the stored one.
+  How the 7.5 s divides between that and the writes was not measured separately.
 
 ## Not measured yet
 

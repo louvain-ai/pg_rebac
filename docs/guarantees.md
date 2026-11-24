@@ -31,6 +31,14 @@
    through `write`, or the tenant must have been backfilled.
 3. **G3, no regrowth.** No refresh can restore a container whose revocation is pending in the outbox. No refresh can
    restore anything for a retired principal.
+
+   "Pending" ends when the relay delivers the delete. A refresh looked up `at_least_as_fresh` an OLDER token after
+   that may, by SpiceDB's consistency rules, be served from a revision up to the revision quantization window
+   (5 s by default) before the delete. For a direct relation this heals within seconds: the delivery queues that
+   principal's refresh at the delete's token. For an arrow tuple or a grant to a subject set, the holders it narrowed
+   are not named by the delivery, so a container regrown this way stays until the sweep re-sends the revocation
+   (after `sweep_settle_ms`) or re-projects them. This is reasoned from SpiceDB's documented semantics, not observed.
+   `consistency = "fully_consistent"` closes it.
 4. **G4, at least as fresh.** A refresh queued by a delivery is looked up at `at_least_as_fresh` the token SpiceDB
    wrote that delivery at. A first read, and anything with no token, is looked up fully consistent.
 5. **G5, tenant isolation.** Every key carries the tenant. A tuple whose ids carry another tenant's prefix is refused
@@ -64,8 +72,9 @@
 8. **G8, the closure matches the live schema.** The daemon re-derives the closure whenever SpiceDB's schema text
    changes: on Watch's notice, and by re-reading it every `closure_check_ms` (10 s). A change to what grants view
    marks `rebac.closure_state` invalid in the same transaction that stores the new list, so every read is `RB503`
-   until every tenant's mirrors are re-read and its principals re-projected. After that, a principal looked up before
-   the change stays `RB503` until it is re-projected. An unsupported closure keeps every read `RB503`. Between a
+   until every tenant's relationships are re-read into the mirrors. After that, a principal looked up before the
+   change (or of unknown lookup time) stays `RB503` until it is re-projected. An unsupported or unparseable schema
+   keeps every read `RB503`. A daemon in shadow mode never changes the live closure state. Between a
    schema write in SpiceDB and the daemon noticing it (up to `closure_check_ms`, or the next start), reads run on the
    old closure; that window is the one this guarantee does not close.
 
@@ -75,6 +84,9 @@
 
 ## Not guaranteed
 
+- **RLS policies made by an earlier version stay permissive** until `rebac.enable_rls` is run again on the table.
+- **The session binding holds only for a role that logs in as itself.** A session whose login role is trusted can
+  `RESET ROLE` after a `SET ROLE` and bind any principal; SQL you do not trust must connect as the untrusted role.
 - **The principal setting is trusted input.** With the default `principal_source => 'setting'`, and for any direct
   call of `rebac.readable_set(p)`, whoever can run SQL chooses the principal. Use that form only for an application
   role that sets it after authenticating the person.

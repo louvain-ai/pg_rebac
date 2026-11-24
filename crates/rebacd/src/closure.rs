@@ -1,6 +1,6 @@
 //! The closure check: derive `rebac.view_relation` from the live SpiceDB schema and compare it with the table.
 
-use crate::Ctx;
+use crate::{config::Mode, Ctx};
 use rebac_schema::{closure, parse, ViewRelation};
 
 pub async fn derive(ctx: &Ctx) -> anyhow::Result<Vec<ViewRelation>> {
@@ -94,6 +94,11 @@ async fn closure_invalid(db: &impl deadpool_postgres::GenericClient) -> anyhow::
 }
 
 async fn invalidate(ctx: &Ctx, why: &str) -> anyhow::Result<()> {
+    if ctx.config.mode == Mode::Shadow {
+        // A shadow daemon does not own the live projection, so it never gates its reads.
+        tracing::error!("the closure no longer matches the schema (shadow mode: live reads are not gated by this daemon)");
+        return Ok(());
+    }
     let why: String = why.chars().take(200).collect();
     ctx.pool
         .get()
@@ -103,14 +108,38 @@ async fn invalidate(ctx: &Ctx, why: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One rebuild at a time across every replica: a session advisory lock on a connection held for the rebuild.
+const REBUILD_LOCK: i64 = 0x7262_6163_636c_6f73; // "rbacclos"
+
 /// THE REBUILD after the closure changed. In one transaction the new list is stored and the closure marked invalid,
 /// so every read fails closed (RB503) from the moment the stored list stops matching what it was built from. Then,
 /// per tenant, the mirrors are pruned of relations that no longer grant view and re-read from SpiceDB, and every
-/// principal is re-projected (`backfill`). Only when every tenant succeeded is the closure valid again; a principal
-/// whose lookup began before the change still fails closed until it is re-projected (`rebac.checked`).
+/// principal is re-projected (`backfill`). Once every tenant's relationships have been re-read the closure is valid
+/// again. A principal whose re-projection failed stays closed on its own (`rebac.checked`: looked up before the
+/// change) until the sweep, which this forces, re-projects it. If a tenant's relationships cannot be read, the
+/// closure stays invalid and the caller retries.
+///
+/// In SHADOW mode the list is stored and the shadow rebuilt, but the live closure state is never touched and the
+/// mirrors are not pruned: the live projection is whoever maintains it.
 pub async fn rebuild(ctx: &Ctx, rels: &[ViewRelation], why: &str) -> anyhow::Result<()> {
+    let lock = ctx.pool.get().await?;
+    lock.execute("select pg_advisory_lock($1)", &[&REBUILD_LOCK])
+        .await?;
+    let r = rebuild_locked(ctx, rels, why).await;
+    let _ = lock
+        .execute("select pg_advisory_unlock($1)", &[&REBUILD_LOCK])
+        .await;
+    r
+}
+
+async fn rebuild_locked(ctx: &Ctx, rels: &[ViewRelation], why: &str) -> anyhow::Result<()> {
+    let live = ctx.config.mode == Mode::Live;
     {
         let mut db = ctx.pool.get().await?;
+        // Another replica may have finished this very rebuild while this one waited for the lock.
+        if stored(&db).await? == rels && !(live && closure_invalid(&db).await?) {
+            return Ok(());
+        }
         let tx = db.transaction().await?;
         tx.execute("delete from rebac.view_relation", &[]).await?;
         for r in rels {
@@ -120,22 +149,24 @@ pub async fn rebuild(ctx: &Ctx, rels: &[ViewRelation], why: &str) -> anyhow::Res
             )
             .await?;
         }
-        let why: String = why.chars().take(200).collect();
-        tx.execute("select rebac.invalidate_closure($1)", &[&why])
+        if live {
+            let why: String = why.chars().take(200).collect();
+            tx.execute("select rebac.invalidate_closure($1)", &[&why])
+                .await?;
+            // Mirrored tuples of relations that no longer grant view narrow nothing now; drop them.
+            tx.batch_execute(
+                "delete from rebac.edge e where not exists (select 1 from rebac.view_relation v
+                   where v.kind = 'arrow' and v.relation = e.relation and v.resource_type = rebac.setting('resource_type'));
+                 delete from rebac.set_grant g where not exists (select 1 from rebac.view_relation v
+                   where v.kind = 'direct' and v.relation = g.relation and v.resource_type = rebac.setting('resource_type'));",
+            )
             .await?;
-        // Mirrored tuples of relations that no longer grant view narrow nothing now; drop them.
-        tx.batch_execute(
-            "delete from rebac.edge e where not exists (select 1 from rebac.view_relation v
-               where v.kind = 'arrow' and v.relation = e.relation and v.resource_type = rebac.setting('resource_type'));
-             delete from rebac.set_grant g where not exists (select 1 from rebac.view_relation v
-               where v.kind = 'direct' and v.relation = g.relation and v.resource_type = rebac.setting('resource_type'));",
-        )
-        .await?;
+        }
         tx.commit().await?;
     }
     tracing::warn!(
         relations = rels.len(),
-        "the closure changed: reads fail closed while every tenant is rebuilt"
+        "the closure changed: rebuilding every tenant (live reads fail closed meanwhile)"
     );
     let tenants: Vec<String> = ctx
         .pool
@@ -150,34 +181,34 @@ pub async fn rebuild(ctx: &Ctx, rels: &[ViewRelation], why: &str) -> anyhow::Res
         .iter()
         .map(|r| r.get(0))
         .collect();
-    let mut failed = 0usize;
+    let (mut unread, mut unprojected) = (0usize, 0usize);
     for t in &tenants {
         match crate::backfill::backfill(ctx, t).await {
-            Ok(b) => failed += b.failed,
+            Ok(b) => unprojected += b.failed,
             Err(e) => {
-                tracing::error!(error = %crate::logs::kind_of(&e), "a tenant's rebuild failed");
-                failed += 1;
+                tracing::error!(error = %crate::logs::kind_of(&e), "a tenant's relationships could not be re-read");
+                unread += 1;
             }
         }
     }
-    if failed > 0 {
-        anyhow::bail!("the rebuild left {failed} principals or tenants unprojected; the closure stays invalid");
+    if unread > 0 {
+        anyhow::bail!("{unread} tenants could not be re-read; the closure stays invalid");
     }
-    ctx.pool
-        .get()
-        .await?
-        .execute("select rebac.accept_closure()", &[])
-        .await?;
-    // The sweep re-projects everyone again soon after; Watch reopens on the new types.
-    ctx.pool
-        .get()
-        .await?
-        .execute(
-            "update rebac.sweep_claim set last_at = now() - interval '1 year'",
-            &[],
-        )
-        .await?;
-    tracing::info!(tenants = tenants.len(), "the closure is rebuilt");
+    let db = ctx.pool.get().await?;
+    if live {
+        db.execute("select rebac.accept_closure()", &[]).await?;
+    }
+    // The sweep re-projects everyone again, the principals that failed above among them.
+    db.execute(
+        "update rebac.sweep_claim set last_at = now() - interval '1 year'",
+        &[],
+    )
+    .await?;
+    tracing::info!(
+        tenants = tenants.len(),
+        unprojected,
+        "the closure is rebuilt; principals not yet re-projected stay closed until the sweep reaches them"
+    );
     Ok(())
 }
 
@@ -194,16 +225,14 @@ pub enum Recheck {
 pub async fn recheck(ctx: &Ctx) -> anyhow::Result<Recheck> {
     match derive_checked(ctx).await? {
         Derived::Unsupported(why) => {
-            if !closure_invalid(&ctx.pool.get().await?).await? {
-                tracing::error!("the SpiceDB schema's closure is unsupported: reads fail closed");
-            }
+            tracing::error!("the SpiceDB schema's closure is unsupported: reads fail closed");
             invalidate(ctx, &format!("unsupported: {why}")).await?;
             Ok(Recheck::Unsupported)
         }
         Derived::Supported(derived) => {
             let db = ctx.pool.get().await?;
             let have = stored(&db).await?;
-            let invalid = closure_invalid(&db).await?;
+            let invalid = ctx.config.mode == Mode::Live && closure_invalid(&db).await?;
             drop(db);
             if have == derived && !invalid {
                 return Ok(Recheck::Unchanged);
@@ -227,7 +256,7 @@ pub async fn check_at_start(ctx: &Ctx, accept: bool) -> anyhow::Result<()> {
     };
     let mut db = ctx.pool.get().await?;
     let have = stored(&db).await?;
-    let invalid = closure_invalid(&db).await?;
+    let invalid = ctx.config.mode == Mode::Live && closure_invalid(&db).await?;
     if have.is_empty() && !invalid {
         write(&mut db, &derived).await?;
         return Ok(());

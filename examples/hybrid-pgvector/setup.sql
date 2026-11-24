@@ -43,10 +43,11 @@ select 'acme', b.principal, 'c' || c
 from breadth b cross join lateral (
   select c from generate_series(0, :containers - 1) c order by md5(b.principal || c) limit ceil(b.fraction * :containers)
 ) x;
-insert into rebac.principal_state (tenant, principal, state, n_containers, version, projected_at)
-select 'acme', principal, 'projected', count(*), 1, now() from rebac.readable where tenant = 'acme' group by principal;
+insert into rebac.principal_state (tenant, principal, state, n_containers, version, projected_at, looked_up_at)
+select 'acme', principal, 'projected', count(*), 1, now(), now() from rebac.readable where tenant = 'acme' group by principal;
 insert into rebac.watch_state (scope, heartbeat_at) values ('*', now())
 on conflict (scope) do update set heartbeat_at = now();
 analyze;
--- No daemon runs beside this example, so nothing beats the heartbeat: switch the staleness bound off here only.
-update rebac.config set value = '0' where key = 'max_staleness_ms';
+-- No daemon runs beside this example, so nothing beats the heartbeat and nothing re-projects: switch the liveness
+-- and freshness bounds off here only (a static projection).
+update rebac.config set value = '0' where key in ('max_staleness_ms', 'max_projection_age_ms');

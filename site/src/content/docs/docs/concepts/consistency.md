@@ -104,7 +104,7 @@ an upgrade have no lookup time, and read as `RB503` until the sweep re-projects 
 |---|---|
 | G1 | Every row a query fenced by `rebac.readable_set` returns lies in a container the projection holds for that tenant and principal, at the query's snapshot. No row is returned unless the principal's check passed. |
 | G2 | A view revocation written through `rebac.write` in a READ COMMITTED transaction is absent from the projection when that transaction commits, as scoped above, including against a refresh that races it. |
-| G3 | No refresh can restore a container whose revocation is pending in the outbox, or anything for a retired principal. |
+| G3 | No refresh can restore a container whose revocation is pending in the outbox, or anything for a retired principal. Once delivered, an arrow or set-grant removal can be regrown by an `at_least_as_fresh` refresh with an older token served inside SpiceDB's quantization window, until the sweep re-sends it; `fully_consistent` closes this (reasoned, not observed). |
 | G4 | A refresh queued by a delivery is looked up at least as fresh as the token that delivery was written at. |
 | G5 | Every key carries the tenant. A reference with another tenant's prefix is refused by `rebac.write`, maps to nobody, and is dropped from a lookup. |
 | G6 | An unknown principal, a missing tenant, a daemon that is not live, a set too old or of unknown age, an unavailable lookup and an over-cap set each raise. None is an empty set, or a wider one. |

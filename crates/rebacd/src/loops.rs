@@ -300,6 +300,7 @@ pub async fn closure_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
     // None: the first pass re-derives once (cheap when nothing changed), so a change between the start's check and
     // this loop is not missed.
     let mut last: Option<String> = None;
+    let mut unsupported = false;
     let mut failures = 0u32;
     while !*stop.borrow() {
         tokio::select! {
@@ -312,19 +313,23 @@ pub async fn closure_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
         }
         let r = async {
             let text = ctx.spicedb.read_schema(ctx.config.deadline()).await?;
-            let invalid: bool = ctx
-                .pool
-                .get()
-                .await?
-                .query_opt("select state = 'invalid' from rebac.closure_state", &[])
-                .await?
-                .map(|r| r.get(0))
-                .unwrap_or(false);
-            if last.as_deref() == Some(text.as_str()) && !invalid {
+            let invalid: bool = ctx.config.mode == crate::config::Mode::Live
+                && ctx
+                    .pool
+                    .get()
+                    .await?
+                    .query_opt("select state = 'invalid' from rebac.closure_state", &[])
+                    .await?
+                    .map(|r| r.get(0))
+                    .unwrap_or(false);
+            // Unchanged text: nothing to do, unless an earlier rebuild left the closure invalid (then retry it). An
+            // unsupported schema stays invalid until its text changes.
+            if last.as_deref() == Some(text.as_str()) && (!invalid || unsupported) {
                 return anyhow::Ok(());
             }
             let outcome = crate::closure::recheck(&ctx).await?;
             tracing::info!(?outcome, "closure re-checked");
+            unsupported = outcome == crate::closure::Recheck::Unsupported;
             last = Some(text);
             anyhow::Ok(())
         }

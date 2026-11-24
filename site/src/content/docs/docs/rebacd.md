@@ -94,7 +94,8 @@ disagree:
 
 In **live** mode the daemon relays the outbox and keeps `rebac.readable`.
 
-In **shadow** mode it writes only `rebac.readable_shadow`, relays nothing and re-sends nothing. Use it to prove a
+In **shadow** mode it writes `rebac.readable_shadow` and never `rebac.readable`, relays nothing and re-sends nothing.
+It still stores the closure in `rebac.view_relation` and mirrors arrows and set grants it reads in a backfill. Use it to prove a
 projection against your SpiceDB before anything reads it, then compare with `rebacd verify --shadow`.
 
 ```sh
@@ -127,10 +128,16 @@ The daemon re-derives the closure whenever SpiceDB's schema text changes, and ac
   - re-reads arrows and set grants from SpiceDB;
   - re-projects every principal.
 
-  Then it marks the closure valid. A principal whose lookup began before the change stays `RB503` until it is
-  re-projected. If any tenant fails, the closure stays invalid and the rebuild is retried.
+  Once every tenant's relationships have been re-read, it marks the closure valid. A principal whose lookup began
+  before the change, or whose re-projection failed, stays `RB503` until it is re-projected; the rebuild forces a
+  sweep for that. If a tenant's relationships cannot be read, the closure stays invalid and the rebuild is retried.
+  One replica rebuilds at a time.
 - **A closure pg_rebac cannot project soundly** (exclusion, say): the closure is marked invalid and every read is
-  `RB503` until the schema is supported again, which then rebuilds.
+  `RB503` until the schema is supported again, which then rebuilds. A schema text the daemon cannot parse counts
+  as this too, even where the part it cannot parse is outside the projected permission.
+
+**In shadow mode** the daemon stores the new list and rebuilds the shadow projection, but never marks the live
+closure invalid or prunes the mirrors: whatever maintains the live projection owns its reads.
 
 The rebuild re-reads every tenant, so a large deployment is unreadable for as long as that takes. Plan schema changes
 that touch the projected permission as you would a migration.

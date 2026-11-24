@@ -121,5 +121,11 @@ which runs as its owner, so the untrusted role needs no access to `rebac.readabl
 ignored, a transaction with nothing bound is `RB400`, and changing `rebac.tenant` after binding is `RB422`. The
 binding ends with the transaction. `tests/sql/12_rls.sql` checks each of these.
 
+The boundary holds for a role that logs in as itself. `SET ROLE` is reversible: SQL running in a session whose login
+role is trusted can `RESET ROLE` and bind any principal. Give the untrusted code its own login.
+
+A table fenced by an earlier version of `enable_rls` keeps its permissive policy until you run `enable_rls` on it
+again.
+
 This form is not inlined into the plan: a `SECURITY DEFINER` function never is. Postgres evaluates the set once per
 query as a hashed subplan, so prefer the setting form, or the explicit fence, for planner-sensitive vector search.

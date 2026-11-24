@@ -564,9 +564,15 @@ async fn the_daemon_end_to_end() {
         .await
         .unwrap();
     assert_eq!(row.get::<_, String>(0), "valid", "rebuilt, valid again");
-    assert_eq!(row.get::<_, i64>(1), 1, "the new relation is in the closure");
+    assert_eq!(
+        row.get::<_, i64>(1),
+        1,
+        "the new relation is in the closure"
+    );
     assert!(
-        set_of(&ctx, "acme", "ana").await.contains(&"vdoc".to_string()),
+        set_of(&ctx, "acme", "ana")
+            .await
+            .contains(&"vdoc".to_string()),
         "the rebuild projected the new relation's grant"
     );
     assert_eq!(
@@ -575,11 +581,12 @@ async fn the_daemon_end_to_end() {
     );
 
     // An unsupported schema (exclusion: removing a tuple can grant) fails every read closed until it is fixed.
-    let excluding = with_viewer.replace(
-        "relation viewer: user\n",
-        "relation viewer: user\n  relation banned: user\n",
-    )
-    .replace("+ parent->view", "+ parent->view - banned");
+    let excluding = with_viewer
+        .replace(
+            "relation viewer: user\n",
+            "relation viewer: user\n  relation banned: user\n",
+        )
+        .replace("+ parent->view", "+ parent->view - banned");
     s.write_schema(&excluding, Duration::from_secs(5))
         .await
         .unwrap();
@@ -587,7 +594,9 @@ async fn the_daemon_end_to_end() {
         closure::recheck(&ctx).await.unwrap(),
         closure::Recheck::Unsupported
     );
-    c.batch_execute("select rebac.heartbeat('*')").await.unwrap();
+    c.batch_execute("select rebac.heartbeat('*')")
+        .await
+        .unwrap();
     let err = c
         .batch_execute("set rebac.tenant = 'acme'; select * from rebac.readable_set('ana')")
         .await
@@ -642,9 +651,14 @@ async fn the_daemon_end_to_end() {
     }
     stop_tx.send(true).unwrap();
     cl.await.unwrap();
-    assert!(valid, "the closure loop re-derived and rebuilt after the schema was fixed");
     assert!(
-        !set_of(&ctx, "acme", "ana").await.contains(&"vdoc".to_string()),
+        valid,
+        "the closure loop re-derived and rebuilt after the schema was fixed"
+    );
+    assert!(
+        !set_of(&ctx, "acme", "ana")
+            .await
+            .contains(&"vdoc".to_string()),
         "the relation that left the closure no longer grants"
     );
 }
