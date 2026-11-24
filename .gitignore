@@ -1,2 +1,3 @@
 /target
 tests/sql/.*.err
+tests/tls/.certs

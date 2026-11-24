@@ -56,6 +56,15 @@ cargo build --release -p rebacd
 DATABASE_URL=postgres://… SPICEDB_TOKEN=… ./target/release/rebacd --config rebac.toml run
 ```
 
+TLS to Postgres follows the connection string's `sslmode`, with libpq's meanings:
+
+- `verify-full` checks the chain (the public roots, or `sslrootcert=<pem file>`) and the host name. Use it for a
+  hosted Postgres.
+- `require` encrypts without verifying the server.
+- `prefer` (the default) takes TLS when it is offered.
+- `disable` is plaintext.
+- `verify-ca` is refused.
+
 `rebac.toml` holds connections and tuning only (see `crates/rebacd/src/config.rs`). What is projected (the resource
 type, the permission, the tenant separator) lives in the `rebac.config` table, which the SQL and the daemon both read.
 
@@ -95,6 +104,7 @@ docker compose up -d --wait                           # Postgres (pgvector) on :
 REBAC_TEST_URL=postgres://postgres:rebac@127.0.0.1:55433 tests/sql/run.sh
 cargo test && cargo clippy --all-targets
 REBAC_IT=1 cargo test -p rebacd --test integration    # the daemon against the real SpiceDB
+REBAC_TLS_IT=1 REBAC_TLS_CA=$(tests/tls/up.sh) cargo test -p rebacd --test tls   # sslmode against a TLS Postgres
 ```
 
 ## Licence

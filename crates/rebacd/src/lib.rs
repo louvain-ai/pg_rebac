@@ -25,6 +25,7 @@ pub mod loops;
 pub mod project;
 pub mod relay;
 pub mod spicedb;
+pub mod tls;
 pub mod verify;
 
 /// Everything a loop needs.

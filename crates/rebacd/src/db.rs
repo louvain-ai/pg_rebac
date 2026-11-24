@@ -1,13 +1,13 @@
 //! Postgres access. Every step the daemon takes is a `rebac.*` SQL function; this module only calls them.
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use tokio_postgres::NoTls;
 
+/// A pool over the connection string, with TLS as its `sslmode` says (`tls.rs`).
 pub fn pool(url: &str, size: usize) -> anyhow::Result<Pool> {
-    let pg: tokio_postgres::Config = url.parse()?;
+    let (pg, tls) = crate::tls::configure(url)?;
     let mgr = Manager::from_config(
         pg,
-        NoTls,
+        tls,
         ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         },
