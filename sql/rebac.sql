@@ -478,16 +478,19 @@ begin
     raise exception 'rebac.project: target must be live or shadow' using errcode = 'RB422';
   end if;
   if target = 'shadow' then
-    delete from rebac.readable_shadow where tenant = t and principal = p;
     if exists (select 1 from rebac.principal_state where tenant = t and principal = p and state = 'retired') then
+      delete from rebac.readable_shadow where tenant = t and principal = p;
       return 0;
     end if;
+    select coalesce(array_agg(distinct c), '{}') into final
+    from unnest(containers) c
+    where c is not null and c not in (select rebac.pending_revoked(t, p));
+    delete from rebac.readable_shadow r where r.tenant = t and r.principal = p
+      and not exists (select 1 from unnest(final) f(c) where f.c = r.container);
     insert into rebac.readable_shadow (tenant, principal, container)
-    select t, p, c from unnest(containers) c
-    where c is not null and c not in (select rebac.pending_revoked(t, p))
+    select t, p, c from unnest(final) c
     on conflict do nothing;
-    get diagnostics n = row_count;
-    return n;
+    return cardinality(final);
   end if;
 
   if exists (select 1 from rebac.principal_state where tenant = t and principal = p and state = 'retired') then
@@ -498,8 +501,8 @@ begin
   from unnest(containers) c
   where c is not null and c not in (select rebac.pending_revoked(t, p));
   n := cardinality(final);
-  delete from rebac.readable where tenant = t and principal = p;
   if n > cap then
+    delete from rebac.readable where tenant = t and principal = p;
     -- Never truncated: a truncated set is a wrong fence. Unavailable until someone raises the cap.
     insert into rebac.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version)
     values (t, p, 'unavailable', 'over_cap', token, now(), 0, 1)
@@ -508,8 +511,13 @@ begin
           n_containers = 0, version = rebac.principal_state.version + 1;
     return 0;
   end if;
+  -- A DIFF, not a rewrite: only the containers that left are deleted and only the new ones inserted, so a refresh
+  -- after a small change writes a small amount (no dead tuple, no index entry, no WAL for what stayed).
+  delete from rebac.readable r where r.tenant = t and r.principal = p
+    and not exists (select 1 from unnest(final) f(c) where f.c = r.container);
   if n > 0 then
-    insert into rebac.readable (tenant, principal, container) select t, p, c from unnest(final) c;
+    insert into rebac.readable (tenant, principal, container) select t, p, c from unnest(final) c
+    on conflict do nothing;
     delete from rebac.readable_empty where tenant = t and principal = p;
   else
     insert into rebac.readable_empty (tenant, principal, checked_at) values (t, p, now())

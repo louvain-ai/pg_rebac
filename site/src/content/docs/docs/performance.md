@@ -54,12 +54,31 @@ full table, with max latency, the `in`-form exact path and `ef_search = 200`, is
 5. **A larger `ef_search`** raised the broad readers' recall (0.84 to 0.97 at 100% breadth) and changed little for
    narrow ones, whose recall is bounded by the scan limit.
 
+## Write side: a refresh is a diff
+
+A refresh re-projects a principal from SpiceDB. `rebac.project` writes only the difference from the stored set,
+deleting the containers that left and inserting the new ones. What stayed is not rewritten, so it costs no dead
+tuple, no index entry and no WAL. Measured with `examples/project-churn/churn.sql`:
+
+- **Set-up.** One tenant of 1,000 principals, each reading 5,000 containers (5 million rows). Each round
+  re-projects 200 principals with 1% of their containers replaced. Postgres 17 in Docker on a 10-CPU laptop, five
+  rounds.
+- **Results.** Per round of 200 refreshes:
+
+  | `rebac.project` | Time | WAL | Rows inserted | Rows deleted |
+  |---|---|---|---|---|
+  | Delete everything, reinsert (before) | 12.1 s | 395 MB | 1,000,000 | 1,000,000 |
+  | Diff (now) | 7.5 s | 8.8 MB | 10,000 | 10,000 |
+
+- **The cost that remains.** A refresh still reads the principal's whole set from SpiceDB and compares it with the
+  stored one. That read and comparison is most of the 7.5 s.
+
 ## Not measured yet
 
 - A planner support function supplying per-principal selectivity, so Postgres could choose the path itself.
 - Postgres 18.
 - Tenants with skewed passages per container.
-- Write-side costs: narrowing at commit and relay throughput.
+- Write-side costs of narrowing at commit and of relay throughput.
 
 ## Reproduce it
 
