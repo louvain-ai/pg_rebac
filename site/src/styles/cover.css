@@ -101,6 +101,7 @@ h1 {
   font-size: clamp(2.1rem, 3.2vw, 2.9rem); line-height: 1.02; letter-spacing: -0.035em;
   font-weight: 640; font-stretch: 92%; margin: 0 0 24px; text-wrap: balance;
 }
+.sub { font-size: 1.3rem; font-weight: 550; margin: 0 0 16px; max-width: 32em; }
 .lede { font-size: 1.15rem; color: var(--muted); margin: 0 0 20px; max-width: 34em; }
 .status { margin: 0 0 28px; font-size: 15px; color: var(--muted); border-left: 2px solid var(--accent); padding-left: 12px; }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; }
@@ -143,6 +144,7 @@ h2 { font-size: clamp(1.5rem, 2.4vw, 2rem); letter-spacing: -0.02em; line-height
 h3 { font-size: 1.2rem; letter-spacing: -0.01em; line-height: 1.25; font-weight: 620; margin: 0 0 10px; }
 .section-lede { color: var(--muted); margin: -12px 0 28px; max-width: 40em; }
 .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; }
+.why .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; }
 .facts p { margin: 0 0 12px; max-width: 36em; }
 .facts .scope { font-size: 14.5px; color: var(--muted); }
 
@@ -183,7 +185,7 @@ h3 { font-size: 1.2rem; letter-spacing: -0.01em; line-height: 1.25; font-weight:
 
 @media (max-width: 920px) {
   .hero { grid-template-columns: minmax(0, 1fr); gap: 40px; padding-top: 32px; padding-bottom: 64px; }
-  .facts { grid-template-columns: minmax(0, 1fr); gap: 36px; }
+  .facts, .why .facts { grid-template-columns: minmax(0, 1fr); gap: 36px; }
 }
 @media (max-width: 560px) {
   .bar, main, .foot { padding-left: 16px; padding-right: 16px; }

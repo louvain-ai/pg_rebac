@@ -1,7 +1,15 @@
 # pg_rebac
 
-**Every query sees only what its user may read: SpiceDB permissions, enforced inside the Postgres plan, before the
-`order by` and the `limit`.**
+**Search everything. Return only what's authorised.**
+
+Native relationship-based authorisation for PostgreSQL, pgvector and AI retrieval: SpiceDB permissions, enforced
+inside the Postgres plan, before the `order by` and the `limit`.
+
+- **Fenced ANN in 4 to 7 ms at 5% to 50% reader breadth**, all k rows at recall 0.90 to 0.96. That is p50 of 10
+  queries, one client, on 500,000 synthetic 128-dimension passages with a warm cache; see
+  [the study and its limits](docs/planner.md).
+- **No remote authorisation call on a warm read.** A projected principal's fenced query reads local tables only.
+  The first read of a principal asks the daemon once (`RB404`, then retry).
 
 [![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-4a3fd0)](LICENSE)
 [![Postgres 14+](https://img.shields.io/badge/postgres-14%2B-336791)](sql/rebac.sql)

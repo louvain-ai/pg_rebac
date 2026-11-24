@@ -9,9 +9,9 @@ import { users } from "../data/users";
 // Previews and local builds are never indexed; only the production deployment is (see astro.config.mjs).
 const indexable = process.env.VERCEL_ENV === "production";
 const repo = "https://github.com/louvain-ai/pg_rebac";
-const title = "pg_rebac: permission-aware reads inside Postgres";
+const title = "pg_rebac: search everything, return only what's authorised";
 const description =
-  "SpiceDB relationships mirrored into an indexed readable set that Postgres plans like any other join. Fenced vector search, revocations in force at commit.";
+  "Native relationship-based authorisation for PostgreSQL, pgvector and AI retrieval. SpiceDB relationships mirrored into an indexed readable set that Postgres plans like any other join.";
 ---
 
 <!doctype html>
@@ -55,7 +55,8 @@ const description =
     <main id="main">
       <section class="hero">
         <div class="hero-text">
-          <h1>Permission&#8209;aware reads, inside Postgres.</h1>
+          <h1>Search everything. Return only what's authorised.</h1>
+          <p class="sub">Native relationship-based authorisation for PostgreSQL, pgvector and AI retrieval.</p>
           <p class="lede">
             pg_rebac mirrors SpiceDB's relationships into an indexed readable set. Put it in your
             <code>where</code> clause and Postgres plans it as one more join, so the fence applies before the
@@ -113,9 +114,10 @@ const description =
               the same search unfenced.
             </p>
             <p class="scope">
-              500,000 passages, HNSW at pgvector defaults, k = 20, <code>hnsw.iterative_scan = relaxed_order</code>,
-              one 4-CPU machine with everything cached. Readers below about 1% take the exact path instead, 1.6 ms
-              at full recall. <a href="/docs/performance/">The study and its method</a>
+              p50 of 10 queries, one client, on 500,000 synthetic 128-dimension passages, HNSW at pgvector defaults,
+              k = 20, <code>hnsw.iterative_scan = relaxed_order</code>, one 4-CPU machine with everything cached.
+              Readers below about 1% take the exact path instead, 1.6 ms at full recall. <a
+              href="/docs/performance/">The study, its method and its limits</a>
             </p>
           </article>
           <article>
@@ -130,6 +132,18 @@ const description =
               READ COMMITTED transaction (the Postgres default). Writes made outside <code>rebac.write</code> are
               narrowed by the sweep. <a href="/docs/concepts/consistency/">What is
               guaranteed</a>
+            </p>
+          </article>
+          <article>
+            <h3>No remote authorisation call on a warm read</h3>
+            <p>
+              Once a principal is projected, a fenced query reads only local tables: the readable set and the
+              principal's state. Nothing on the read path calls SpiceDB or the daemon.
+            </p>
+            <p class="scope">
+              A principal's first read is <code>RB404</code>: your application asks the daemon to project it, which
+              asks SpiceDB once, then retries. Grants arrive through refreshes in the background. <a
+              href="/docs/concepts/readable-set/">The readable set</a>
             </p>
           </article>
         </div>

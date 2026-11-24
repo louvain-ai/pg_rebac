@@ -1,6 +1,6 @@
 ---
 title: FAQ
-description: pg_rebac against Postgres row-level security, against SpiceDB on its own, and the name.
+description: pg_rebac against filtering after retrieval, Postgres row-level security, SpiceDB on its own and AuthZed Materialize, and the name.
 ---
 
 ## Why not just filter results after retrieval?
@@ -32,6 +32,23 @@ through RLS: `rebac.enable_rls(table, column)` generates a restrictive policy, u
 choose the principal is spelled out in [row-level security](/docs/concepts/readable-set/#row-level-security). Or apply the fence
 explicitly in each query, as the examples do. The two compose: RLS decides where the fence is applied, pg_rebac
 decides what it holds.
+
+## How does it compare with AuthZed Materialize?
+
+Both keep a precomputed copy of SpiceDB permissions near the data, so a read does not wait on a permission check.
+They differ in scope and in where the copy lives.
+
+- **AuthZed Materialize** is AuthZed's commercial service. It supports a broader range of SpiceDB schemas, and it
+  publishes permission changes as streams that any datastore can consume, Postgres or not.
+- **pg_rebac** is Apache-2.0 and lives inside Postgres:
+  - the projection is an ordinary table, and Postgres plans the fence as a join, with tested paths for pgvector's
+    HNSW scans (relaxed iterative scans, and an exact path for narrow readers);
+  - a revocation written through `rebac.write` is removed in the same transaction that writes it, for the
+    [schema shapes it supports](/docs/schema-support/): direct relations, arrows and one level of subject sets.
+    Schemas outside those are refused.
+
+Choose Materialize for broader schema coverage, or to feed permissions to more than one datastore. Choose pg_rebac
+for an open-source fence that is part of the Postgres query plan, with revocations tied to the writing transaction.
 
 ## Why not ask SpiceDB on every query?
 
