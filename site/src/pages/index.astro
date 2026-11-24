@@ -2,6 +2,9 @@
 import "@fontsource-variable/instrument-sans";
 import "@fontsource-variable/jetbrains-mono";
 import "../styles/cover.css";
+import LouvainMark from "../components/LouvainMark.astro";
+import MadeBy from "../components/MadeBy.astro";
+import { users } from "../data/users";
 
 // Previews and local builds are never indexed; only the production deployment is (see astro.config.mjs).
 const indexable = process.env.VERCEL_ENV === "production";
@@ -58,7 +61,7 @@ const description =
             <code>where</code> clause and Postgres plans it as one more join, so the fence applies before the
             <code>order by</code> and the <code>limit</code>.
           </p>
-          <p class="status">Slice 1, pre-release. Running in shadow at Louvain.</p>
+          <p class="status">Slice 1, pre-release. Running in shadow at <a href="#users">Louvain</a>.</p>
           <div class="actions">
             <a class="btn primary" href="/docs/getting-started/">Get started</a>
             <a class="btn" href={repo}>Source on GitHub</a>
@@ -193,12 +196,30 @@ DATABASE_URL=postgres://… SPICEDB_TOKEN=… \
           <a href="/docs/faq/">FAQ</a>
         </p>
       </section>
+      <section class="users" aria-labelledby="users">
+        <h2 id="users">Users</h2>
+        <ul>
+          {users.map((u) => (
+            <li>
+              <a class="who" href={u.href}>
+                {u.mark === "louvain" && <LouvainMark size={22} />}
+                <span>{u.name}</span>
+              </a>
+              <div>
+                <p>{u.line}</p>
+                <p class="use-status">{u.status}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <p class="add">Running pg_rebac? <a href={`${repo}/issues`}>Open an issue</a> to be listed.</p>
+      </section>
     </main>
 
     <footer class="foot">
-      <p>Apache-2.0. Built by <a href="https://louvain.ai">Louvain</a>. SpiceDB is a project of Authzed; pg_rebac is
+      <MadeBy />
+      <p>Apache-2.0. <a href={repo}>github.com/louvain-ai/pg_rebac</a>. SpiceDB is a project of Authzed; pg_rebac is
         not affiliated with it.</p>
-      <p><a href={repo}>github.com/louvain-ai/pg_rebac</a></p>
     </footer>
 
     <script is:inline>

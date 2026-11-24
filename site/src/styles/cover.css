@@ -16,6 +16,7 @@
   --sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
   --radius: 6px;
+  --louvain-mark: #535bd5;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -33,6 +34,7 @@
     --code-s: #7fd3bf;
     --code-f: #a69cff;
     --code-c: #7c8696;
+    --louvain-mark: #a1aaff;
     color-scheme: dark;
   }
 }
@@ -50,6 +52,7 @@
   --code-s: #7fd3bf;
   --code-f: #a69cff;
   --code-c: #7c8696;
+  --louvain-mark: #a1aaff;
   color-scheme: dark;
 }
 
@@ -160,6 +163,23 @@ h3 { font-size: 1.2rem; letter-spacing: -0.01em; line-height: 1.25; font-weight:
   display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; font-size: 14px; color: var(--muted);
 }
 .foot p { margin: 0; }
+
+.users { padding-top: 56px; padding-bottom: 64px; }
+.users ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); max-width: 920px; }
+.users li {
+  display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; padding: 20px 0;
+  border-bottom: 1px solid var(--line); align-items: baseline;
+}
+.users .who { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 620; font-size: 1.1rem; }
+.users .who:hover { text-decoration: underline; text-underline-offset: 0.18em; }
+.users .who .louvain-mark { color: var(--louvain-mark); align-self: center; }
+.users p { margin: 0 0 6px; max-width: 40em; }
+.users .use-status { font-size: 14.5px; color: var(--muted); }
+.users .add { margin: 20px 0 0; font-size: 14.5px; color: var(--muted); }
+@media (max-width: 560px) {
+  .users li { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .users { padding-top: 40px; padding-bottom: 48px; }
+}
 
 @media (max-width: 920px) {
   .hero { grid-template-columns: minmax(0, 1fr); gap: 40px; padding-top: 32px; padding-bottom: 64px; }

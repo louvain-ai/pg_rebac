@@ -24,6 +24,7 @@ export default defineConfig({
         "./src/styles/theme.css",
       ],
       head: robots,
+      components: { Footer: "./src/components/Footer.astro" },
       lastUpdated: false,
       pagination: true,
       sidebar: [
