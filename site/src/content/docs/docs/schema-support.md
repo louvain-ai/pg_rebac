@@ -15,7 +15,7 @@ The projected permission may be any union (`+`) of:
 - **a self-arrow** (`parent->view`), a container under another container;
 - **an arrow to another type and a relation there** (`workspace->admin`);
 - **subject sets one level deep** (`group#member`, where `group#member` holds plain object types);
-- **wildcards** (`user:*`) on a relation of the projected type, from 0.2.0 (unreleased). A wildcard grant refreshes
+- **wildcards** (`user:*`) on a relation of the projected type. A wildcard grant refreshes
   every principal the tenant knows; its removal narrows every holder of the container at commit, like an arrow's.
 
 A schema of the shape the tests are built on:
@@ -72,7 +72,7 @@ supported again ([schema changes while running](/docs/rebacd/#schema-changes-whi
 | Intersection arrow (`.all()`) | Not supported. |
 | Caveats (`with some_caveat`) | A caveated relationship cannot be evaluated locally. |
 | Expiring relationships (`with expiration`) | Cannot be evaluated locally. |
-| Wildcards (`user:*`) on a relation reached through an arrow, or inside a subject set | Not supported. (In 0.1.x every wildcard is refused: a wildcard grant cannot be narrowed per principal.) |
+| Wildcards (`user:*`) on a relation reached through an arrow, or inside a subject set | Not supported. |
 | Nested subject sets (`group#member` holding `group#member`) | A set's members must be plain object types. |
 | A subject set naming a permission | It must name a relation of a defined type. |
 | An arrow more than one hop from the projected type | Not supported. |
