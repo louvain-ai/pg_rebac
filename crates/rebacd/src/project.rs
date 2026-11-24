@@ -113,6 +113,9 @@ pub async fn refresh_one(
         .iter()
         .map(|r| r.get(0))
         .collect();
+    // FRESHNESS is stamped from this database's clock, just before SpiceDB is asked: the set reflects every change
+    // SpiceDB held at this instant (or, at_least_as_fresh, within SpiceDB's revision quantization of it).
+    let looked_up_at: std::time::SystemTime = tx.query_one("select clock_timestamp()", &[]).await?.get(0);
     let (found, mut stats) = lookup(ctx, &tx, tenant, principal, token, deadline).await?;
     let containers: Vec<String> = found.into_iter().filter(|c| !pending.contains(c)).collect();
     let target = match ctx.config.mode {
@@ -121,8 +124,8 @@ pub async fn refresh_one(
     };
     stats.containers = tx
         .query_one(
-            "select rebac.project($1, $2, $3, $4, $5)",
-            &[&tenant, &principal, &containers, &token, &target],
+            "select rebac.project($1, $2, $3, $4, $5, $6)",
+            &[&tenant, &principal, &containers, &token, &target, &looked_up_at],
         )
         .await?
         .get(0);

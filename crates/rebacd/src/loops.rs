@@ -274,9 +274,9 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
         }
         let token = msg.changes_through.map(|t| t.token);
         c.execute(
-            "insert into rebac.watch_state (scope, zedtoken, external_writes) values ('watch', $1, $2)
+            "insert into rebac.watch_state (scope, zedtoken, external_writes, watched_at) values ('watch', $1, $2, now())
              on conflict (scope) do update set zedtoken = coalesce(excluded.zedtoken, rebac.watch_state.zedtoken),
-               external_writes = rebac.watch_state.external_writes + excluded.external_writes",
+               external_writes = rebac.watch_state.external_writes + excluded.external_writes, watched_at = now()",
             &[&token, &external],
         )
         .await?;

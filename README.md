@@ -84,15 +84,20 @@ Slice 1, pre-release. It has the pure-SQL mode, the `rebacd` daemon, and the tes
 - **Three different answers.**
   - `RB404` means the principal was never asked: call the daemon's `POST /lookup`, then retry.
   - An empty set means the principal was asked and can read nothing.
-  - `RB503` means unavailable: the projection is stale, over its cap, or SpiceDB could not be asked.
+  - `RB503` means unavailable: the daemon is not live, the principal's set is too old or of unknown age, it is over
+    its cap, or SpiceDB could not be asked.
   - A missing `rebac.tenant` is `RB400`. None of these is ever an empty set by accident.
 - **Revocations in force at commit.** Write relationships with `rebac.write(op, resource, relation, subject)` in
   your own transaction. A deferred trigger removes every revocation it queued from the projection before the
   transaction commits, whether or not SpiceDB or the daemon is up. This holds for direct relations, arrows and
   subject sets, including a refresh racing the commit, and needs READ COMMITTED: a revocation in a REPEATABLE READ
   or SERIALIZABLE transaction is refused (`RB422`). See [`docs/guarantees.md`](docs/guarantees.md).
-- **A staleness bound.** Reads fail closed (`RB503`) once the daemon has not heartbeated for `max_staleness_ms`
-  (default 5000). The daemon beats only while it can reach both SpiceDB and Postgres.
+- **Two bounds, both failing closed (`RB503`).**
+  - *Liveness*: the daemon has heartbeated within `max_staleness_ms` (default 5000). It beats only while it can
+    reach both SpiceDB and Postgres. This proves the daemon is up, not that any set is current.
+  - *Freshness*: the SpiceDB lookup behind this principal's set began within `max_projection_age_ms` (default one
+    hour, above the daemon's 15-minute sweep, which re-projects everyone). A set of unknown age is never read.
+    `rebac.freshness()` reports the oldest lookup per tenant.
 - **The daemon, `rebacd`.** It:
   - relays the outbox to SpiceDB in order, revocations first, without letting one tenant wait behind another, and
     quarantines a row SpiceDB refuses on its own;

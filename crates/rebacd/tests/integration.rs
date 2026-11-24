@@ -508,4 +508,25 @@ async fn the_daemon_end_to_end() {
     stop_tx.send(true).unwrap();
     w.await.unwrap();
     assert!(counted, "an external write is counted on Watch");
+
+    // FRESHNESS: every set the daemon projected carries when its lookup began, and Watch reports its own position.
+    let c = ctx.pool.get().await.unwrap();
+    let unknown: i64 = c
+        .query_one(
+            "select count(*) from rebac.principal_state where state = 'projected' and looked_up_at is null",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(unknown, 0, "the daemon stamps every lookup");
+    let watched: bool = c
+        .query_one(
+            "select watched_at is not null from rebac.watch_state where scope = 'watch'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(watched, "Watch records when it last heard from SpiceDB");
 }

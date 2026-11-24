@@ -33,7 +33,8 @@ The SQL is installed separately, with `psql` or your migrations. No published im
 - **Sweep.** Every `sweep_interval_ms` (15 minutes) re-projects principals at low priority and re-sends each recent
   revocation once, after `sweep_settle_ms` (5 minutes).
 - **Heartbeat.** Beats every `heartbeat_ms` while both SpiceDB and Postgres answer. See
-  [the staleness bound](/docs/concepts/consistency/#the-staleness-bound).
+  [the two bounds](/docs/concepts/consistency/#two-bounds-liveness-and-freshness). A beat is liveness, not
+  freshness.
 - **Watch.** Follows SpiceDB's Watch stream and counts writes made outside pg_rebac. It is observe-only in slice 1.
 - **HTTP.** `POST /lookup`, `GET /healthz` and `GET /status` on `listen`.
 
@@ -79,7 +80,8 @@ disagree:
 | `subject_type` | `user` |
 | `tenant_separator` | `/` (object ids are `<tenant>/<id>`; empty when ids carry no prefix) |
 | `implicit_subject` | `true` |
-| `max_staleness_ms` | 5000 |
+| `max_staleness_ms` | 5000 (liveness: the daemon's heartbeat) |
+| `max_projection_age_ms` | 3600000 (freshness: each set's last lookup; keep it above `sweep_interval_ms`) |
 | `empty_ttl_ms` | 60000 |
 | `max_containers_per_principal` | 100000 |
 | `narrow_lock_timeout_ms` | 5000 |

@@ -33,7 +33,9 @@ insert into rebac.config (key, value) values
   ('subject_type', 'user'),           -- the SpiceDB subject type principals read as
   ('tenant_separator', '/'),          -- object ids are '<tenant><sep><id>'; '' when ids carry no tenant prefix
   ('implicit_subject', 'true'),       -- a principal also reads as '<subject_type>:<tenant><sep><principal>'
-  ('max_staleness_ms', '5000'),       -- reads fail closed (RB503) when the daemon's heartbeat is older; 0 turns it off
+  ('max_staleness_ms', '5000'),       -- LIVENESS: reads fail closed (RB503) when the daemon's heartbeat is older; 0 off
+  ('max_projection_age_ms', '3600000'), -- FRESHNESS: a principal whose last SpiceDB lookup began longer ago, or never
+                                      -- (unknown), fails closed (RB503); 0 off. Must exceed the daemon's sweep interval
   ('empty_ttl_ms', '60000'),          -- how long "can read nothing" is believed
   ('max_containers_per_principal', '100000'),
   ('narrow_lock_timeout_ms', '5000')  -- how long narrowing waits for a principal's lock before failing the commit
@@ -81,6 +83,9 @@ create table if not exists rebac.principal_state (
   version      bigint not null default 0,   -- moves on every change to the set: a cache key for the application
   primary key (tenant, principal)
 );
+-- When the SpiceDB lookup behind this principal's set BEGAN: the time up to which every change SpiceDB held is
+-- reflected in it (narrowing since only removes). NULL is unknown, and reads fail closed on it (max_projection_age_ms).
+alter table rebac.principal_state add column if not exists looked_up_at timestamptz;
 
 -- Principal -> SpiceDB subjects. A principal reads as the union of its subjects (and its implicit one). The
 -- application writes this table; only `trusted` rows count.
@@ -172,6 +177,9 @@ create table if not exists rebac.watch_state (
   heartbeat_at   timestamptz,
   external_writes bigint not null default 0   -- relationship changes seen on Watch that did not come through rebac.write
 );
+-- When the Watch stream last delivered a message (a change or a checkpoint). Reported, never part of the read bound:
+-- Watch is observe-only, so its position says nothing about the projection.
+alter table rebac.watch_state add column if not exists watched_at timestamptz;
 
 -- Functions the application registers to run inside a narrowing transaction: fn(tenant text, containers text[]).
 create table if not exists rebac.narrow_hook (
@@ -285,16 +293,18 @@ language plpgsql stable parallel safe as $$
 declare
   t text := rebac.tenant();
   bound bigint := coalesce(rebac.setting('max_staleness_ms'), '0')::bigint;
+  age bigint := coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint;
   beat timestamptz;
   st rebac.principal_state;
 begin
   if p is null or p = '' then
     raise exception 'rebac: no principal' using errcode = 'RB400';
   end if;
+  -- LIVENESS: the daemon is up and can reach SpiceDB and Postgres. It says nothing about how current a set is.
   if bound > 0 then
     select max(heartbeat_at) into beat from rebac.watch_state where scope in ('*', t);
     if beat is null or statement_timestamp() - beat > bound * interval '1 millisecond' then
-      raise exception 'rebac: the projection is stale (no daemon heartbeat within % ms)', bound
+      raise exception 'rebac: the daemon is not live (no heartbeat within % ms)', bound
         using errcode = 'RB503', hint = 'rebac_stale: check that rebacd is running and can reach SpiceDB';
     end if;
   end if;
@@ -306,6 +316,13 @@ begin
         using errcode = 'RB503';
     end if;
     if st.state = 'projected' then
+      -- FRESHNESS: the set reflects SpiceDB as of its lookup; one older than the bound, or of unknown age, is not read.
+      if age > 0 and (st.looked_up_at is null
+                      or statement_timestamp() - st.looked_up_at > age * interval '1 millisecond') then
+        raise exception 'rebac: the projection of this principal is older than % ms, or of unknown age', age
+          using errcode = 'RB503',
+                hint = 'rebac_not_fresh: the daemon''s sweep re-projects everyone; POST /lookup re-projects one now';
+      end if;
       if st.n_containers > 0 then return true; end if;
       if exists (select 1 from rebac.readable_empty e where e.tenant = t and e.principal = p
                    and e.checked_at > statement_timestamp()
@@ -421,7 +438,11 @@ $$;
 
 -- Replace a principal's projection with `containers`, minus pending revocations, at `token`. The caller holds the
 -- principal's lock (rebac.lock_principal) from BEFORE its SpiceDB lookup. `target` is 'live' or 'shadow'.
-create or replace function rebac.project(t text, p text, containers text[], token text, target text default 'live')
+-- `looked_up_at` is when that lookup BEGAN (the daemon reads it from this database's clock); a caller that passes
+-- none asserts the set is current now.
+drop function if exists rebac.project(text, text, text[], text, text);
+create or replace function rebac.project(t text, p text, containers text[], token text, target text default 'live',
+                                         looked_up_at timestamptz default now())
 returns integer
 language plpgsql volatile as $$
 declare
@@ -470,11 +491,13 @@ begin
     insert into rebac.readable_empty (tenant, principal, checked_at) values (t, p, now())
     on conflict (tenant, principal) do update set checked_at = now();
   end if;
-  insert into rebac.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version)
-  values (t, p, 'projected', null, token, now(), n, 1)
+  insert into rebac.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version,
+                                     looked_up_at)
+  values (t, p, 'projected', null, token, now(), n, 1, project.looked_up_at)
   on conflict (tenant, principal) do update
     set state = 'projected', reason = null, zedtoken = excluded.zedtoken, projected_at = now(),
-        n_containers = excluded.n_containers, version = rebac.principal_state.version + 1;
+        n_containers = excluded.n_containers, version = rebac.principal_state.version + 1,
+        looked_up_at = excluded.looked_up_at;
   return n;
 end $$;
 
@@ -781,9 +804,14 @@ create trigger rebac_outbox_notify after insert on rebac.outbox
 -- Status and RLS.
 -- -------------------------------------------------------------------------------------------------------------------
 
+-- What an operator watches. heartbeat_age_ms and stale are LIVENESS; oldest_lookup_ms and unfresh_principals are
+-- FRESHNESS (the read bound); relay_lag_ms and watch_age_ms are reported only (a slow relay only delays grants, and
+-- Watch is observe-only).
+drop function if exists rebac.status();
 create or replace function rebac.status() returns table (
   heartbeat_age_ms bigint, stale boolean, pending_outbox bigint, quarantined bigint, refresh_queue bigint,
-  external_writes bigint, unavailable_principals bigint)
+  external_writes bigint, unavailable_principals bigint, relay_lag_ms bigint, watch_age_ms bigint,
+  oldest_lookup_ms bigint, unfresh_principals bigint)
 language sql stable as $$
   select
     (extract(epoch from (statement_timestamp() - (select max(heartbeat_at) from rebac.watch_state))) * 1000)::bigint,
@@ -795,7 +823,32 @@ language sql stable as $$
     (select count(*) from rebac.outbox where error is not null),
     (select count(*) from rebac.refresh),
     (select coalesce(sum(external_writes), 0)::bigint from rebac.watch_state),
-    (select count(*) from rebac.principal_state where state = 'unavailable')
+    (select count(*) from rebac.principal_state where state = 'unavailable'),
+    (select (extract(epoch from (statement_timestamp() - min(created_at))) * 1000)::bigint
+     from rebac.outbox where synced_at is null),
+    (select (extract(epoch from (statement_timestamp() - max(watched_at))) * 1000)::bigint from rebac.watch_state),
+    (select (extract(epoch from (statement_timestamp() - min(looked_up_at))) * 1000)::bigint
+     from rebac.principal_state where state = 'projected'),
+    (select count(*) from rebac.principal_state where state = 'projected'
+       and coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint > 0
+       and (looked_up_at is null or statement_timestamp() - looked_up_at
+            > rebac.setting('max_projection_age_ms')::bigint * interval '1 millisecond'))
+$$;
+
+-- FRESHNESS PER TENANT: the oldest lookup among its projected principals is the time through which the WHOLE tenant
+-- reflects SpiceDB (a sweep's completion, in effect: it re-projects everyone). Counts only.
+create or replace function rebac.freshness() returns table (
+  tenant text, principals bigint, oldest_lookup_at timestamptz, unknown bigint, unfresh bigint, refresh_queue bigint,
+  relay_oldest_pending timestamptz)
+language sql stable as $$
+  select s.tenant, count(*), min(s.looked_up_at), count(*) filter (where s.looked_up_at is null),
+    count(*) filter (where coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint > 0
+      and (s.looked_up_at is null or statement_timestamp() - s.looked_up_at
+           > rebac.setting('max_projection_age_ms')::bigint * interval '1 millisecond')),
+    (select count(*) from rebac.refresh r where r.tenant = s.tenant),
+    (select min(o.created_at) from rebac.outbox o where o.tenant = s.tenant and o.synced_at is null)
+  from rebac.principal_state s where s.state = 'projected'
+  group by s.tenant
 $$;
 
 -- Generate a row-level-security policy that fences reads of `tbl` on `container_column`, the principal read from a

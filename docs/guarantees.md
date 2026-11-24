@@ -38,8 +38,28 @@
 6. **G6, fail closed.**
    - An unknown principal is `RB404`.
    - A missing tenant is `RB400`.
-   - A stale daemon, an unavailable lookup and an over-cap set are each `RB503`.
+   - A daemon that is not live, a set older than the freshness bound or of unknown age, an unavailable lookup and an
+     over-cap set are each `RB503`.
    - None of these is an empty set, or a wider one.
+
+7. **G7, freshness.** A principal's set is read only while the SpiceDB lookup behind it began within
+   `max_projection_age_ms` (one hour by default) of the read; a set with no lookup time is never read. The lookup time
+   is taken from the database's clock just before SpiceDB is asked. A lookup made `fully_consistent` reflects every
+   relationship SpiceDB held at that instant. One made `at_least_as_fresh` a token may be served from a revision up
+   to SpiceDB's revision quantization older (`--datastore-revision-quantization-interval`, 5 s by default). Narrowing
+   only removes rows and never moves the time.
+
+   G7 is the bound for what reaches SpiceDB WITHOUT `rebac.write` (another service, the `zed` CLI). Those changes are
+   picked up only by a re-projection, and the daemon's sweep re-projects everyone every `sweep_interval_ms`
+   (15 minutes by default), so keep the bound above the sweep interval plus the time a sweep takes to drain.
+   Revocations through `rebac.write` never wait on it (G2).
+
+   **Liveness is separate.** `max_staleness_ms` (5 s) fails reads closed when the daemon has not heartbeated. A beat
+   proves only that the daemon is running and can reach SpiceDB and Postgres. It says nothing about how current any
+   set is.
+
+   **On upgrade**, rows written before `looked_up_at` existed have no lookup time. They read as `RB503` until the sweep
+   re-projects them (or `POST /lookup` re-projects one). `rebac.status()` counts them as `unfresh_principals`.
 
 ## Not guaranteed
 
@@ -62,6 +82,7 @@
   `readable_by` remains, as a per-row check.
 - **The principal's check is a pseudo-constant qual.** It is evaluated once, in a gating filter. The principal is
   compared as the caller's own value, so the planner sees its statistics.
-- **Staleness fails closed by default** (5 s), as the owner decided. Revocations through the outbox never wait on it.
+- **Liveness fails closed by default** (5 s), as the owner decided, and so does freshness (one hour). Revocations
+  through the outbox never wait on either.
 - **Consistency is `at_least_as_fresh`** by default, as the owner decided. `fully_consistent` is a setting.
 - **Subject sets, one level, are supported in slice 1.** The first production schema uses them.

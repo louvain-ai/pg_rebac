@@ -1,6 +1,6 @@
 ---
 title: Revocations and consistency
-description: What is in force at commit, what is eventually consistent, the staleness bound, and the guarantees with their limits.
+description: What is in force at commit, what is eventually consistent, the liveness and freshness bounds, and the guarantees with their limits.
 ---
 
 ## Revocations are in force at commit
@@ -69,13 +69,34 @@ it. A first read, and anything without a token, is looked up fully consistent. S
 A refresh holds the principal's lock from before its SpiceDB call to its write, and subtracts revocations still
 pending in the outbox. So a lookup that began before a revocation cannot write the grant back.
 
-## The staleness bound
+## Two bounds: liveness and freshness
 
-The daemon heartbeats only while it can reach both SpiceDB and Postgres. Once the newest heartbeat is older than
-`max_staleness_ms` (5,000 by default), every read fails closed with `RB503`. Revocations through the outbox never
-wait on it; the bound exists so grants and external writes cannot fall arbitrarily far behind unnoticed.
+Both fail a read closed with `RB503`. They answer different questions.
 
-`max_staleness_ms = 0` turns it off, for a deployment that projects from a static source.
+**Liveness** (`max_staleness_ms`, 5,000 by default). The daemon heartbeats only while it can reach both SpiceDB and
+Postgres. Once the newest beat is older than the bound, every read fails closed. A beat proves the daemon is up. It
+does not prove that any set is current.
+
+**Freshness** (`max_projection_age_ms`, one hour by default). Each principal's set carries `looked_up_at`, the
+database's clock just before its SpiceDB lookup began. A set older than the bound, or with no lookup time at all, is
+not read.
+
+- A `fully_consistent` lookup reflects everything SpiceDB held at that instant.
+- An `at_least_as_fresh` lookup may be served from a revision up to SpiceDB's revision quantization older (5 s by
+  default).
+- Narrowing only removes rows, so it never moves the time.
+
+Freshness bounds what reaches SpiceDB without `rebac.write`: another service, or the `zed` CLI. Those changes are
+picked up only by a re-projection, and the sweep re-projects everyone every `sweep_interval_ms` (15 minutes). Keep
+the bound above the sweep interval plus the time a sweep takes to drain.
+
+`rebac.freshness()` reports, per tenant, the oldest lookup among its principals. That is the time through which the
+whole tenant reflects SpiceDB, which is in effect the last sweep's completion. `rebac.status()` reports relay lag
+and the Watch stream's age beside it. Neither feeds the bound: a slow relay only delays grants, and Watch observes
+without applying.
+
+Set either bound to `0` to turn it off, for a deployment that projects from a static source. Rows written before
+an upgrade have no lookup time, and read as `RB503` until the sweep re-projects them.
 
 ## Guarantees
 
@@ -86,7 +107,8 @@ wait on it; the bound exists so grants and external writes cannot fall arbitrari
 | G3 | No refresh can restore a container whose revocation is pending in the outbox, or anything for a retired principal. |
 | G4 | A refresh queued by a delivery is looked up at least as fresh as the token that delivery was written at. |
 | G5 | Every key carries the tenant. A reference with another tenant's prefix is refused by `rebac.write`, maps to nobody, and is dropped from a lookup. |
-| G6 | An unknown principal, a missing tenant, a stale daemon, an unavailable lookup and an over-cap set each raise. None is an empty set, or a wider one. |
+| G6 | An unknown principal, a missing tenant, a daemon that is not live, a set too old or of unknown age, an unavailable lookup and an over-cap set each raise. None is an empty set, or a wider one. |
+| G7 | A set is read only while the SpiceDB lookup behind it began within `max_projection_age_ms`. Liveness is a separate bound. |
 
 ## Not guaranteed
 

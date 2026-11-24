@@ -13,19 +13,28 @@ select * from rebac.status();
 
 | Column | What it tells you |
 |---|---|
-| `heartbeat_age_ms` | Age of the newest daemon heartbeat. Reads fail closed past `max_staleness_ms`. |
-| `stale` | Whether reads are failing closed right now. |
+| `heartbeat_age_ms` | Liveness: age of the newest daemon heartbeat. Reads fail closed past `max_staleness_ms`. |
+| `stale` | Whether reads are failing closed on liveness right now. |
 | `pending_outbox` | Relationship writes not yet delivered to SpiceDB. |
 | `quarantined` | Rows SpiceDB refused, held with their error for a person to look at. |
 | `refresh_queue` | Principals waiting to be re-projected. |
 | `external_writes` | Relationship changes seen on Watch that did not come through `rebac.write`. |
 | `unavailable_principals` | Principals that read as `RB503` until they are refreshed. |
+| `relay_lag_ms` | Age of the oldest undelivered outbox row. Grants wait this long; revocations do not. |
+| `watch_age_ms` | Time since the Watch stream last delivered a change or a checkpoint. |
+| `oldest_lookup_ms` | Freshness: age of the oldest lookup behind any projected set. |
+| `unfresh_principals` | Sets past `max_projection_age_ms`, or of unknown age, which read as `RB503`. |
+
+`select * from rebac.freshness()` breaks freshness down per tenant: principals, the oldest lookup, how many are
+unknown or past the bound, the refresh queue and the oldest undelivered write.
 
 The daemon serves the same row as JSON at `GET /status`, and `GET /healthz` answers `ok` while the process is up.
 `/status` is a 503 when the database cannot be reached.
 
 What each one usually means:
 
+- `unfresh_principals` above zero: the sweep is not keeping up, or a principal's refresh keeps failing. Those
+  principals read as `RB503` until re-projected.
 - `stale` true: the daemon is down, or cannot reach SpiceDB or Postgres. Every fenced read is `RB503` until it beats
   again.
 - `pending_outbox` growing: the relay is not delivering. Revocations are still in force locally; grants wait.
