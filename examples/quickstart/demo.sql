@@ -23,7 +23,7 @@ order by ts_rank(p.tsv, websearch_to_tsquery('english', 'salary or pay or review
 limit 5;
 
 \echo '2. Filtering AFTER retrieval instead: take the top 5 for everyone, then drop what bob may not read.'
-\echo '   The board container, which bob cannot read, takes 4 of the top 5 places. bob asked for 5 rows and gets back:'
+\echo '   Containers bob cannot read (board, payroll) take 4 of the top 5 places. bob asked for 5 rows and gets back:'
 \echo
 select count(*) as rows_left_for_bob
 from (

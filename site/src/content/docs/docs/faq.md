@@ -40,7 +40,7 @@ after the fact is how a vector search returns too few rows: take the top k, drop
 narrow reader gets little or nothing back.
 
 pg_rebac mirrors the permission into Postgres, so the fence applies before the `order by` and the `limit`, in the
-same plan as pgvector or full-text search. A SpiceDB outage costs freshness up to the staleness bound, then reads
+same plan as pgvector or full-text search. A SpiceDB outage costs at most the liveness bound (5 s), then reads
 fail closed. It does not replace SpiceDB's check API for writes, and it does not evaluate caveats.
 
 ## Does it need a C extension?

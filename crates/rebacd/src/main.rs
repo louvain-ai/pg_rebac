@@ -51,7 +51,8 @@ enum Cmd {
         #[arg(long)]
         all_tenants: bool,
     },
-    /// Print the closure derived from the live schema; --write stores it in rebac.view_relation.
+    /// Print the closure derived from the live schema; --write stores it in rebac.view_relation and rebuilds every
+    /// tenant (reads fail closed meanwhile).
     Closure {
         #[arg(long)]
         write: bool,
@@ -170,7 +171,8 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             if write {
-                closure::write(&mut ctx.pool.get().await?, &derived).await?;
+                // Through the rebuild, so reads fail closed until every tenant is re-read under the new list.
+                closure::rebuild(&ctx, &derived, "closure_written").await?;
             }
             Ok(())
         }
@@ -191,6 +193,10 @@ async fn run(ctx: Arc<Ctx>) -> anyhow::Result<()> {
         (
             "heartbeat",
             tokio::spawn(loops::heartbeat_loop(ctx.clone(), stop.clone())),
+        ),
+        (
+            "closure",
+            tokio::spawn(loops::closure_loop(ctx.clone(), stop.clone())),
         ),
     ];
     if ctx.config.mode == Mode::Live {

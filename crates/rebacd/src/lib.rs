@@ -35,6 +35,8 @@ pub struct Ctx {
     pub pool: deadpool_postgres::Pool,
     pub spicedb: spicedb::SpiceDb,
     pub projection: db::Projection,
+    /// Watch kicks this when SpiceDB reports a schema change, so the closure is re-checked at once.
+    pub closure_kick: tokio::sync::Notify,
 }
 
 impl Ctx {
@@ -52,6 +54,7 @@ impl Ctx {
             pool,
             spicedb,
             projection,
+            closure_kick: tokio::sync::Notify::new(),
         })
     }
 }

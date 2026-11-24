@@ -27,7 +27,7 @@ Postgres never inlines a scalar SQL function whose body has a sub-select, so a b
 `exists (...)` runs once per row. A set-returning SQL function used in `from` is inlined. Measured with
 `EXPLAIN (VERBOSE)`, `container in (select * from rebac.readable_set(p))` becomes a semi-join on `readable_pkey`.
 
-The principal's checks (tenant, staleness, state) run once, as a pseudo-constant qual the planner places in a
+The principal's checks (tenant, liveness, the set's freshness, state) run once, as a pseudo-constant qual the planner places in a
 one-time gating filter, before `rebac.readable` is scanned. The principal is compared as the caller's own value,
 so the planner can use its statistics.
 
@@ -55,7 +55,7 @@ The test suite asserts this shape: the fenced vector leg uses the HNSW index wit
 |---|---|---|
 | `RB404` `rebac_not_projected` | This principal was never asked. | Call the daemon's `POST /lookup`, then retry. |
 | An empty set | Asked, and can read nothing. Believed for `empty_ttl_ms` (60,000 by default). | Nothing: it is the answer. |
-| `RB503` `rebac_unavailable` | The projection cannot be trusted now: stale, over its cap, or SpiceDB could not be asked. | Fail the read. |
+| `RB503` `rebac_unavailable` | The projection cannot be trusted now: the daemon is not live, the set is too old or of unknown age, it is over its cap, or SpiceDB could not be asked. | Fail the read. |
 
 Two more codes complete the set. `RB400` is a missing tenant or principal; a read without one is a bug. `RB422` is
 a write the fence refuses, such as a reference that does not carry the tenant's prefix.

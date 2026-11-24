@@ -32,15 +32,17 @@ Running it again is safe: tables are created `if not exists` and functions are r
 
 ## A first readable set
 
-In production the `rebacd` daemon fills the projection from SpiceDB and heartbeats, and reads fail closed when the
-heartbeat is older than `max_staleness_ms` (5,000 by default). To try the SQL on its own, turn the bound off and
-project a principal by hand with `rebac.project`, the same entry point the daemon uses:
+In production the `rebacd` daemon fills the projection from SpiceDB and heartbeats. Reads fail closed when the
+heartbeat is older than `max_staleness_ms` (5,000 by default), and when a principal's set was looked up longer ago
+than `max_projection_age_ms` (one hour). To try the SQL on its own, turn the liveness bound off and project a
+principal by hand with `rebac.project`, the same entry point the daemon uses. A set projected by hand counts as
+looked up now:
 
 ```sql
 -- no daemon in this walkthrough
 update rebac.config set value = '0' where key = 'max_staleness_ms';
 
--- tenant 'acme', principal 'priya', two containers she may view
+-- tenant 'acme', principal 'priya', two containers she may view (looked up now)
 select rebac.project('acme', 'priya', array['handbook', 'pricing'], null);
 ```
 

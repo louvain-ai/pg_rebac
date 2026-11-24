@@ -126,9 +126,9 @@ const description =
               up.
             </p>
             <p class="scope">
-              Exact for direct relations, arrows to another type, and subject-set memberships. Removing an arrow or
-              a grant to a set narrows at commit or at the relay's next pass. Writes made outside
-              <code>rebac.write</code> are narrowed by the sweep. <a href="/docs/concepts/consistency/">What is
+              Exact for direct relations, arrows and subject sets, including a refresh that races the commit, in a
+              READ COMMITTED transaction (the Postgres default). Writes made outside <code>rebac.write</code> are
+              narrowed by the sweep. <a href="/docs/concepts/consistency/">What is
               guaranteed</a>
             </p>
           </article>
@@ -154,7 +154,7 @@ const description =
           </div>
           <div>
             <dt><code>RB503</code></dt>
-            <dd><strong>Unavailable.</strong> The projection is stale, over its cap, or SpiceDB could not be asked.
+            <dd><strong>Unavailable.</strong> The daemon is not live, the set is too old, it is over its cap, or SpiceDB could not be asked.
               The read fails closed.</dd>
           </div>
         </dl>

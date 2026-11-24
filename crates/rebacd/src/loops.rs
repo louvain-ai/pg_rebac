@@ -267,16 +267,12 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
                 external += 1;
             }
         }
-        if msg.schema_updated {
-            tracing::warn!(
-                "the SpiceDB schema changed; restart rebacd to re-derive and check the closure"
-            );
-        }
+        let schema_changed = msg.schema_updated;
         let token = msg.changes_through.map(|t| t.token);
         c.execute(
-            "insert into rebac.watch_state (scope, zedtoken, external_writes) values ('watch', $1, $2)
+            "insert into rebac.watch_state (scope, zedtoken, external_writes, watched_at) values ('watch', $1, $2, now())
              on conflict (scope) do update set zedtoken = coalesce(excluded.zedtoken, rebac.watch_state.zedtoken),
-               external_writes = rebac.watch_state.external_writes + excluded.external_writes",
+               external_writes = rebac.watch_state.external_writes + excluded.external_writes, watched_at = now()",
             &[&token, &external],
         )
         .await?;
@@ -286,5 +282,62 @@ async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Resu
                 "relationship changes not made through rebac.write (narrowed by the sweep only)"
             );
         }
+        if schema_changed {
+            // The closure loop re-derives it; this stream ends so it reopens on the types the new closure names.
+            tracing::warn!("the SpiceDB schema changed: re-checking the closure");
+            ctx.closure_kick.notify_one();
+            return Ok(());
+        }
     }
+}
+
+/// THE CLOSURE, KEPT. Re-reads the live schema every `closure_check_ms`, and at once when Watch reports a schema
+/// change; when its text differs from the last one checked (or the closure is invalid from before), it re-derives
+/// the closure (`closure::recheck`): unsupported, reads fail closed; changed, every tenant is rebuilt while reads fail
+/// closed. Not tied to Watch, so a deployment with `watch = false`, or a dropped stream, still notices.
+pub async fn closure_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
+    let every = Duration::from_millis(ctx.config.closure_check_ms.max(500));
+    // None: the first pass re-derives once (cheap when nothing changed), so a change between the start's check and
+    // this loop is not missed.
+    let mut last: Option<String> = None;
+    let mut failures = 0u32;
+    while !*stop.borrow() {
+        tokio::select! {
+            _ = tokio::time::sleep(every) => {},
+            _ = ctx.closure_kick.notified() => {},
+            _ = stop.changed() => {},
+        }
+        if *stop.borrow() {
+            break;
+        }
+        let r = async {
+            let text = ctx.spicedb.read_schema(ctx.config.deadline()).await?;
+            let invalid: bool = ctx
+                .pool
+                .get()
+                .await?
+                .query_opt("select state = 'invalid' from rebac.closure_state", &[])
+                .await?
+                .map(|r| r.get(0))
+                .unwrap_or(false);
+            if last.as_deref() == Some(text.as_str()) && !invalid {
+                return anyhow::Ok(());
+            }
+            let outcome = crate::closure::recheck(&ctx).await?;
+            tracing::info!(?outcome, "closure re-checked");
+            last = Some(text);
+            anyhow::Ok(())
+        }
+        .await;
+        match r {
+            Ok(()) => failures = 0,
+            Err(e) => {
+                failures += 1;
+                if failures == 1 {
+                    tracing::error!(error = %crate::logs::kind_of(&e), "closure re-check failed; retrying");
+                }
+            }
+        }
+    }
+    tracing::debug!("closure_loop stopped");
 }

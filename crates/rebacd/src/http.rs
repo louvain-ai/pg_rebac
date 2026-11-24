@@ -98,7 +98,8 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json::Va
         let row = c
             .query_one(
                 "select heartbeat_age_ms, stale, pending_outbox, quarantined, refresh_queue, external_writes,
-                        unavailable_principals from rebac.status()",
+                        unavailable_principals, relay_lag_ms, watch_age_ms, oldest_lookup_ms, unfresh_principals
+                 from rebac.status()",
                 &[],
             )
             .await?;
@@ -110,6 +111,10 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json::Va
             "refresh_queue": row.get::<_, i64>(4),
             "external_writes": row.get::<_, i64>(5),
             "unavailable_principals": row.get::<_, i64>(6),
+            "relay_lag_ms": row.get::<_, Option<i64>>(7),
+            "watch_age_ms": row.get::<_, Option<i64>>(8),
+            "oldest_lookup_ms": row.get::<_, Option<i64>>(9),
+            "unfresh_principals": row.get::<_, i64>(10),
         }))
     }
     .await;

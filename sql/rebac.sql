@@ -33,7 +33,9 @@ insert into rebac.config (key, value) values
   ('subject_type', 'user'),           -- the SpiceDB subject type principals read as
   ('tenant_separator', '/'),          -- object ids are '<tenant><sep><id>'; '' when ids carry no tenant prefix
   ('implicit_subject', 'true'),       -- a principal also reads as '<subject_type>:<tenant><sep><principal>'
-  ('max_staleness_ms', '5000'),       -- reads fail closed (RB503) when the daemon's heartbeat is older; 0 turns it off
+  ('max_staleness_ms', '5000'),       -- LIVENESS: reads fail closed (RB503) when the daemon's heartbeat is older; 0 off
+  ('max_projection_age_ms', '3600000'), -- FRESHNESS: a principal whose last SpiceDB lookup began longer ago, or never
+                                      -- (unknown), fails closed (RB503); 0 off. Must exceed the daemon's sweep interval
   ('empty_ttl_ms', '60000'),          -- how long "can read nothing" is believed
   ('max_containers_per_principal', '100000'),
   ('narrow_lock_timeout_ms', '5000')  -- how long narrowing waits for a principal's lock before failing the commit
@@ -81,6 +83,9 @@ create table if not exists rebac.principal_state (
   version      bigint not null default 0,   -- moves on every change to the set: a cache key for the application
   primary key (tenant, principal)
 );
+-- When the SpiceDB lookup behind this principal's set BEGAN: the time up to which every change SpiceDB held is
+-- reflected in it (narrowing since only removes). NULL is unknown, and reads fail closed on it (max_projection_age_ms).
+alter table rebac.principal_state add column if not exists looked_up_at timestamptz;
 
 -- Principal -> SpiceDB subjects. A principal reads as the union of its subjects (and its implicit one). The
 -- application writes this table; only `trusted` rows count.
@@ -105,6 +110,18 @@ create table if not exists rebac.view_relation (
   target_type   text,          -- arrow: the type it points at
   through       text,          -- via: the arrow on the projected type that reaches this relation
   primary key (resource_type, relation)
+);
+
+-- THE CLOSURE'S STATE, for the whole deployment (rebac.view_relation is deployment-wide). The daemon re-derives the
+-- closure whenever SpiceDB's schema changes. 'invalid' while the live schema's closure is unsupported, or differs from
+-- the stored one and the mirrors (edge, set_grant) and projections have not been rebuilt: every read fails closed
+-- (RB503). After a rebuild it is 'valid' again, and `changed_at` stays: a principal whose lookup began before it
+-- still fails closed until it is re-projected. No row is the state before any daemon has checked: valid.
+create table if not exists rebac.closure_state (
+  id         boolean primary key default true check (id),
+  state      text not null check (state in ('valid', 'invalid')),
+  reason     text,
+  changed_at timestamptz not null default now()
 );
 
 -- Local copy of arrow tuples (child#relation@parent), so narrowing works with SpiceDB and the daemon down.
@@ -172,6 +189,9 @@ create table if not exists rebac.watch_state (
   heartbeat_at   timestamptz,
   external_writes bigint not null default 0   -- relationship changes seen on Watch that did not come through rebac.write
 );
+-- When the Watch stream last delivered a message (a change or a checkpoint). Reported, never part of the read bound:
+-- Watch is observe-only, so its position says nothing about the projection.
+alter table rebac.watch_state add column if not exists watched_at timestamptz;
 
 -- Functions the application registers to run inside a narrowing transaction: fn(tenant text, containers text[]).
 create table if not exists rebac.narrow_hook (
@@ -247,11 +267,31 @@ language sql stable as $$
     and strpos(subj, '#') = 0
 $$;
 
--- One writer per (tenant, principal): a refresh, a lazy first read and a narrowing all take it before asking SpiceDB.
+-- THE LOCK ORDER, for every writer of the projection: the TENANT first, then the PRINCIPAL.
+--   * A refresh, a lazy first read, a retirement and a narrowing that names its principals take the tenant SHARED, then
+--     the principal's own lock exclusively (rebac.lock_principal), before asking SpiceDB, until they commit.
+--   * A narrowing that removes an arrow tuple or a grant to a subject set names nobody: it narrows every holder of the
+--     container. It takes the tenant EXCLUSIVELY (rebac.lock_tenant) before it reads who the holders are, so every
+--     refresh of that tenant in flight has committed (and its row is visible to the read), and every refresh after it
+--     waits for its commit (and then sees the revocation pending in the outbox).
+-- Tenant locks use the two-key advisory space and principal locks the one-key space, so the two never collide.
+-- Tenants are always locked in sorted order, then principals in sorted order: no two writers wait on each other.
+create or replace function rebac.lock_tenant(t text, exclusive boolean default false) returns void
+language plpgsql volatile as $$
+begin
+  if exclusive then
+    perform pg_advisory_xact_lock(1919050595, hashtext(t));
+  else
+    perform pg_advisory_xact_lock_shared(1919050595, hashtext(t));
+  end if;
+end $$;
+
 create or replace function rebac.lock_principal(t text, p text) returns void
-language sql volatile as $$
-  select pg_advisory_xact_lock(hashtextextended('rebac:' || t || ':' || p, 0))
-$$;
+language plpgsql volatile as $$
+begin
+  perform rebac.lock_tenant(t, false);
+  perform pg_advisory_xact_lock(hashtextextended('rebac:' || t || ':' || p, 0));
+end $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
 -- The read side.
@@ -265,18 +305,28 @@ language plpgsql stable parallel safe as $$
 declare
   t text := rebac.tenant();
   bound bigint := coalesce(rebac.setting('max_staleness_ms'), '0')::bigint;
+  age bigint := coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint;
   beat timestamptz;
+  cl rebac.closure_state;
   st rebac.principal_state;
 begin
   if p is null or p = '' then
     raise exception 'rebac: no principal' using errcode = 'RB400';
   end if;
+  -- LIVENESS: the daemon is up and can reach SpiceDB and Postgres. It says nothing about how current a set is.
   if bound > 0 then
     select max(heartbeat_at) into beat from rebac.watch_state where scope in ('*', t);
     if beat is null or statement_timestamp() - beat > bound * interval '1 millisecond' then
-      raise exception 'rebac: the projection is stale (no daemon heartbeat within % ms)', bound
+      raise exception 'rebac: the daemon is not live (no heartbeat within % ms)', bound
         using errcode = 'RB503', hint = 'rebac_stale: check that rebacd is running and can reach SpiceDB';
     end if;
+  end if;
+  -- THE CLOSURE: a schema change that alters what can grant view makes every set suspect until it is rebuilt.
+  select * into cl from rebac.closure_state;
+  if found and cl.state = 'invalid' then
+    raise exception 'rebac: the SpiceDB schema changed what grants view (%); reads wait for the rebuild',
+      coalesce(cl.reason, 'unknown')
+      using errcode = 'RB503', hint = 'rebac_closure: rebacd re-derives the closure and rebuilds; see rebac.closure_state';
   end if;
   select * into st from rebac.principal_state where tenant = t and principal = p;
   if found then
@@ -286,6 +336,17 @@ begin
         using errcode = 'RB503';
     end if;
     if st.state = 'projected' then
+      -- FRESHNESS: the set reflects SpiceDB as of its lookup; one older than the bound, or of unknown age, is not read.
+      if age > 0 and (st.looked_up_at is null
+                      or statement_timestamp() - st.looked_up_at > age * interval '1 millisecond') then
+        raise exception 'rebac: the projection of this principal is older than % ms, or of unknown age', age
+          using errcode = 'RB503',
+                hint = 'rebac_not_fresh: the daemon''s sweep re-projects everyone; POST /lookup re-projects one now';
+      end if;
+      if cl.changed_at is not null and st.looked_up_at < cl.changed_at then
+        raise exception 'rebac: this principal was projected before the schema''s closure last changed'
+          using errcode = 'RB503', hint = 'rebac_closure: it is re-projected by the rebuild, the sweep or POST /lookup';
+      end if;
       if st.n_containers > 0 then return true; end if;
       if exists (select 1 from rebac.readable_empty e where e.tenant = t and e.principal = p
                    and e.checked_at > statement_timestamp()
@@ -401,7 +462,11 @@ $$;
 
 -- Replace a principal's projection with `containers`, minus pending revocations, at `token`. The caller holds the
 -- principal's lock (rebac.lock_principal) from BEFORE its SpiceDB lookup. `target` is 'live' or 'shadow'.
-create or replace function rebac.project(t text, p text, containers text[], token text, target text default 'live')
+-- `looked_up_at` is when that lookup BEGAN (the daemon reads it from this database's clock); a caller that passes
+-- none asserts the set is current now.
+drop function if exists rebac.project(text, text, text[], text, text);
+create or replace function rebac.project(t text, p text, containers text[], token text, target text default 'live',
+                                         looked_up_at timestamptz default now())
 returns integer
 language plpgsql volatile as $$
 declare
@@ -450,11 +515,13 @@ begin
     insert into rebac.readable_empty (tenant, principal, checked_at) values (t, p, now())
     on conflict (tenant, principal) do update set checked_at = now();
   end if;
-  insert into rebac.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version)
-  values (t, p, 'projected', null, token, now(), n, 1)
+  insert into rebac.principal_state (tenant, principal, state, reason, zedtoken, projected_at, n_containers, version,
+                                     looked_up_at)
+  values (t, p, 'projected', null, token, now(), n, 1, project.looked_up_at)
   on conflict (tenant, principal) do update
     set state = 'projected', reason = null, zedtoken = excluded.zedtoken, projected_at = now(),
-        n_containers = excluded.n_containers, version = rebac.principal_state.version + 1;
+        n_containers = excluded.n_containers, version = rebac.principal_state.version + 1,
+        looked_up_at = excluded.looked_up_at;
   return n;
 end $$;
 
@@ -514,6 +581,16 @@ begin
      or rebac.strip(t, split_part(rebac.obj_id(subject), '#', 1)) is null then
     raise exception 'rebac.write: a reference does not carry this tenant''s prefix' using errcode = 'RB422';
   end if;
+  -- A revocation is narrowed at commit by deleting rows that a refresh may have committed a moment earlier. Under
+  -- REPEATABLE READ or SERIALIZABLE that delete reads the transaction's first snapshot and cannot see such a row, so
+  -- it would commit un-narrowed: refused, never weakened.
+  if op = 'delete' and current_setting('transaction_isolation') <> 'read committed'
+     and exists (select 1 from rebac.view_relation vr
+                 where vr.resource_type = rebac.obj_type(resource) and vr.relation = write.relation) then
+    raise exception 'rebac.write: a revocation must commit under READ COMMITTED (this transaction is %)',
+      current_setting('transaction_isolation')
+      using errcode = 'RB422', hint = 'write revocations in a READ COMMITTED transaction (the Postgres default)';
+  end if;
   insert into rebac.outbox (tenant, op, resource, relation, subject)
   values (t, op, resource, relation, subject) returning outbox.seq into new_seq;
 
@@ -538,11 +615,14 @@ begin
   return new_seq;
 end $$;
 
--- Narrow every revocation among these outbox rows (net per relationship, latest seq wins), under the affected
--- principals' locks taken in sorted order. Returns the number of projection rows removed. The commit trigger calls it
--- with this transaction's rows; the relay calls it again with the rows it claims, which is a no-op when the writing
--- transaction already narrowed, and the safety net when it did not.
-create or replace function rebac.narrow_seqs(seqs bigint[]) returns integer
+-- Narrow every revocation among these outbox rows (net per relationship, latest seq wins), under the lock order above.
+-- Returns the number of projection rows removed. The commit trigger calls it with this transaction's rows and
+-- `hold_tenants` true; the relay calls it again with the rows it claims and `hold_tenants` false, which is a no-op when
+-- the writing transaction already narrowed, and the safety net when it did not. (The relay's rows are committed, so a
+-- refresh reads them as pending and needs no tenant lock to be kept from regrowing them; and the relay holds its
+-- transaction across SpiceDB writes, which must not stall every refresh of a tenant.)
+drop function if exists rebac.narrow_seqs(bigint[]);
+create or replace function rebac.narrow_seqs(seqs bigint[], hold_tenants boolean default true) returns integer
 language plpgsql volatile as $$
 declare
   removed integer := 0;
@@ -552,9 +632,40 @@ declare
   prior text := current_setting('lock_timeout');
 begin
   if seqs is null or cardinality(seqs) = 0 then return 0; end if;
+  if current_setting('transaction_isolation') <> 'read committed' and exists (
+       select 1 from rebac.outbox o join rebac.view_relation v
+         on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation
+       where o.seq = any(seqs) and o.op = 'delete') then
+    raise exception 'rebac: a revocation must be narrowed under READ COMMITTED (this transaction is %)',
+      current_setting('transaction_isolation') using errcode = 'RB422';
+  end if;
   create temp table if not exists rebac_narrow_pairs (tenant text, principal text, container text)
     on commit drop;
   truncate rebac_narrow_pairs;
+  create temp table if not exists rebac_narrow_holders (tenant text, container text) on commit drop;
+  truncate rebac_narrow_holders;
+
+  -- An arrow, or a grant to a subject set, removed: everyone who holds the container loses it. Who holds it is read
+  -- only AFTER the tenant is held exclusively (below).
+  insert into rebac_narrow_holders (tenant, container)
+  with net as (
+    select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
+    from rebac.outbox where seq = any(seqs)
+    order by resource, relation, subject, seq desc
+  )
+  select distinct d.tenant, rebac.strip(d.tenant, rebac.obj_id(d.resource))
+  from net d join rebac.view_relation v
+    on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
+   and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
+  where d.op = 'delete' and v.resource_type = root;
+
+  perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
+  if hold_tenants then
+    for rec_p in select distinct tenant from rebac_narrow_holders order by tenant loop
+      perform rebac.lock_tenant(rec_p.tenant, true);
+    end loop;
+  end if;
+  perform set_config('lock_timeout', prior, true);
 
   with net as (
     select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
@@ -585,13 +696,6 @@ begin
     join rebac.edge e on e.tenant = d.tenant and e.relation = v.through
       and e.parent = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource))
   ),
-  arrow as (  -- an arrow, or a grant to a subject set, removed: everyone who holds the container loses it
-    select d.tenant, rebac.strip(d.tenant, rebac.obj_id(d.resource)) as container
-    from del d join rebac.view_relation v
-      on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
-     and (v.kind = 'arrow' or (v.kind = 'direct' and strpos(d.subject, '#') > 0))
-    where v.resource_type = root
-  ),
   membership as (  -- a member leaves a subject set: they lose what the set was granted
     select d.tenant, d.subject, g.container
     from del d join rebac.view_relation v
@@ -609,8 +713,9 @@ begin
   select x.tenant, p, x.container
   from membership x cross join lateral rebac.principals_of(x.tenant, x.subject) p
   union
+  -- a new statement, so a new snapshot: it sees every refresh that committed while the tenant lock was awaited
   select r.tenant, r.principal, r.container
-  from arrow a join rebac.readable r on r.tenant = a.tenant and r.container = a.container;
+  from rebac_narrow_holders a join rebac.readable r on r.tenant = a.tenant and r.container = a.container;
 
   -- Everything under a lost container through self-arrows goes with it (a space's shared files).
   with recursive closure(tenant, principal, container) as (
@@ -723,9 +828,14 @@ create trigger rebac_outbox_notify after insert on rebac.outbox
 -- Status and RLS.
 -- -------------------------------------------------------------------------------------------------------------------
 
+-- What an operator watches. heartbeat_age_ms and stale are LIVENESS; oldest_lookup_ms and unfresh_principals are
+-- FRESHNESS (the read bound); relay_lag_ms and watch_age_ms are reported only (a slow relay only delays grants, and
+-- Watch is observe-only).
+drop function if exists rebac.status();
 create or replace function rebac.status() returns table (
   heartbeat_age_ms bigint, stale boolean, pending_outbox bigint, quarantined bigint, refresh_queue bigint,
-  external_writes bigint, unavailable_principals bigint)
+  external_writes bigint, unavailable_principals bigint, relay_lag_ms bigint, watch_age_ms bigint,
+  oldest_lookup_ms bigint, unfresh_principals bigint)
 language sql stable as $$
   select
     (extract(epoch from (statement_timestamp() - (select max(heartbeat_at) from rebac.watch_state))) * 1000)::bigint,
@@ -737,7 +847,32 @@ language sql stable as $$
     (select count(*) from rebac.outbox where error is not null),
     (select count(*) from rebac.refresh),
     (select coalesce(sum(external_writes), 0)::bigint from rebac.watch_state),
-    (select count(*) from rebac.principal_state where state = 'unavailable')
+    (select count(*) from rebac.principal_state where state = 'unavailable'),
+    (select (extract(epoch from (statement_timestamp() - min(created_at))) * 1000)::bigint
+     from rebac.outbox where synced_at is null),
+    (select (extract(epoch from (statement_timestamp() - max(watched_at))) * 1000)::bigint from rebac.watch_state),
+    (select (extract(epoch from (statement_timestamp() - min(looked_up_at))) * 1000)::bigint
+     from rebac.principal_state where state = 'projected'),
+    (select count(*) from rebac.principal_state where state = 'projected'
+       and coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint > 0
+       and (looked_up_at is null or statement_timestamp() - looked_up_at
+            > rebac.setting('max_projection_age_ms')::bigint * interval '1 millisecond'))
+$$;
+
+-- FRESHNESS PER TENANT: the oldest lookup among its projected principals is the time through which the WHOLE tenant
+-- reflects SpiceDB (a sweep's completion, in effect: it re-projects everyone). Counts only.
+create or replace function rebac.freshness() returns table (
+  tenant text, principals bigint, oldest_lookup_at timestamptz, unknown bigint, unfresh bigint, refresh_queue bigint,
+  relay_oldest_pending timestamptz)
+language sql stable as $$
+  select s.tenant, count(*), min(s.looked_up_at), count(*) filter (where s.looked_up_at is null),
+    count(*) filter (where coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint > 0
+      and (s.looked_up_at is null or statement_timestamp() - s.looked_up_at
+           > rebac.setting('max_projection_age_ms')::bigint * interval '1 millisecond')),
+    (select count(*) from rebac.refresh r where r.tenant = s.tenant),
+    (select min(o.created_at) from rebac.outbox o where o.tenant = s.tenant and o.synced_at is null)
+  from rebac.principal_state s where s.state = 'projected'
+  group by s.tenant
 $$;
 
 -- Generate a row-level-security policy that fences reads of `tbl` on `container_column`, the principal read from a
@@ -993,4 +1128,18 @@ create or replace function rebac.heartbeat(sc text default '*') returns void
 language sql volatile as $$
   insert into rebac.watch_state (scope, heartbeat_at) values (sc, now())
   on conflict (scope) do update set heartbeat_at = now()
+$$;
+
+-- The daemon's closure transitions. INVALIDATE: reads fail closed from now on. ACCEPT: the rebuild is done; the
+-- principals projected before `changed_at` still fail closed one by one until each is re-projected.
+create or replace function rebac.invalidate_closure(why text) returns void
+language sql volatile as $$
+  insert into rebac.closure_state (id, state, reason, changed_at) values (true, 'invalid', why, now())
+  on conflict (id) do update set state = 'invalid', reason = excluded.reason, changed_at = now()
+$$;
+
+create or replace function rebac.accept_closure() returns void
+language sql volatile as $$
+  insert into rebac.closure_state (id, state, reason, changed_at) values (true, 'valid', null, '-infinity')
+  on conflict (id) do update set state = 'valid', reason = null
 $$;

@@ -33,8 +33,12 @@ The SQL is installed separately, with `psql` or your migrations. No published im
 - **Sweep.** Every `sweep_interval_ms` (15 minutes) re-projects principals at low priority and re-sends each recent
   revocation once, after `sweep_settle_ms` (5 minutes).
 - **Heartbeat.** Beats every `heartbeat_ms` while both SpiceDB and Postgres answer. See
-  [the staleness bound](/docs/concepts/consistency/#the-staleness-bound).
+  [the two bounds](/docs/concepts/consistency/#two-bounds-liveness-and-freshness). A beat is liveness, not
+  freshness.
 - **Watch.** Follows SpiceDB's Watch stream and counts writes made outside pg_rebac. It is observe-only in slice 1.
+  A schema change on the stream starts a closure re-check at once, and the stream reopens on the new closure's types.
+- **Closure.** Re-reads the live schema every `closure_check_ms` (10 seconds), and at once on Watch's notice, so a
+  schema change is caught with `watch = false` too. See [schema changes while running](#schema-changes-while-running).
 - **HTTP.** `POST /lookup`, `GET /healthz` and `GET /status` on `listen`.
 
 ## Configuration
@@ -68,6 +72,7 @@ watch             = true
 | `refresh_idle_ms` | 250 | |
 | `sweep_interval_ms` | 900000 | |
 | `sweep_settle_ms` | 300000 | |
+| `closure_check_ms` | 10000 | How often the live schema is re-read for a closure change |
 
 What is projected lives in the `rebac.config` table, which the SQL and the daemon both read, so the two cannot
 disagree:
@@ -79,7 +84,8 @@ disagree:
 | `subject_type` | `user` |
 | `tenant_separator` | `/` (object ids are `<tenant>/<id>`; empty when ids carry no prefix) |
 | `implicit_subject` | `true` |
-| `max_staleness_ms` | 5000 |
+| `max_staleness_ms` | 5000 (liveness: the daemon's heartbeat) |
+| `max_projection_age_ms` | 3600000 (freshness: each set's last lookup; keep it above `sweep_interval_ms`) |
 | `empty_ttl_ms` | 60000 |
 | `max_containers_per_principal` | 100000 |
 | `narrow_lock_timeout_ms` | 5000 |
@@ -101,13 +107,33 @@ rebacd --config rebac.toml backfill --tenant acme --shadow
 At start the daemon reads the SpiceDB schema and derives the relations that can change the projected permission
 (see [schema support](/docs/schema-support/)). An empty `rebac.view_relation` is filled. One that differs from the
 schema refuses the start, because a missing relation is a grant that never refreshes or a revocation that never
-narrows. To accept the new schema:
+narrows. The refusal also marks the closure invalid, so reads fail closed (`RB503`) rather than run on a list that no
+longer matches. To accept the new schema:
 
 ```sh
-rebacd closure            # print what the live schema derives
-rebacd closure --write    # store it
-rebacd run --accept-schema   # or replace it at start, and re-project everyone
+rebacd closure               # print what the live schema derives
+rebacd closure --write       # store it and rebuild every tenant
+rebacd run --accept-schema   # or store it and rebuild at start
 ```
+
+## Schema changes while running
+
+The daemon re-derives the closure whenever SpiceDB's schema text changes, and acts on what it finds:
+
+- **The same relations grant view**: nothing happens. A schema change elsewhere is not a projection change.
+- **Different relations grant view**: in one transaction it stores the new list and marks `rebac.closure_state`
+  invalid. Every read is `RB503` from that commit. Then, tenant by tenant, it:
+  - drops mirrored tuples of relations that no longer grant view;
+  - re-reads arrows and set grants from SpiceDB;
+  - re-projects every principal.
+
+  Then it marks the closure valid. A principal whose lookup began before the change stays `RB503` until it is
+  re-projected. If any tenant fails, the closure stays invalid and the rebuild is retried.
+- **A closure pg_rebac cannot project soundly** (exclusion, say): the closure is marked invalid and every read is
+  `RB503` until the schema is supported again, which then rebuilds.
+
+The rebuild re-reads every tenant, so a large deployment is unreadable for as long as that takes. Plan schema changes
+that touch the projected permission as you would a migration.
 
 ## The lazy first read
 
