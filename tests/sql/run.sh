@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Run the SQL suite: each test file in a fresh database with rebac.sql installed.
 #   REBAC_TEST_URL=postgres://user:pass@host:port   (a server; databases are created and dropped)
+#   tests/sql/run.sh [glob]                          (only the files matching it, e.g. '09_*')
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 base="${REBAC_TEST_URL:-postgres://postgres:rebac@127.0.0.1:55433}"
 export PGOPTIONS="-c client_min_messages=warning"
 failed=0
-for f in "$here"/[0-9]*.sql; do
+for f in "$here"/${1:-[0-9]*}.sql; do
   name="$(basename "$f" .sql)"
   db="rebac_t_${name//[^a-z0-9_]/_}_$$"
   psql "$base/postgres" -qAt -c "create database $db" >/dev/null

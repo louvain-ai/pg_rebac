@@ -175,6 +175,15 @@ REBAC_IT=1 cargo test -p rebacd --test integration    # the daemon against the r
 REBAC_TLS_IT=1 REBAC_TLS_CA=$(tests/tls/up.sh) cargo test -p rebacd --test tls   # sslmode against a TLS Postgres
 ```
 
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push to main and every pull request:
+
+- `cargo clippy -D warnings` and `cargo test`;
+- the SQL suite on Postgres 14, 15, 16 and 17 with pgvector;
+- 20 rounds of the revocation-versus-refresh races and the held-lock fault (`tests/sql/run.sh '0[69]_*'`);
+- the daemon against a real SpiceDB (`REBAC_IT=1`).
+
+The TLS test runs locally only.
+
 ## Website
 
 The cover page and docs live in [`site/`](site/) (Astro Starlight): `cd site && npm ci && npm run dev`.

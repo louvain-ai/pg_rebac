@@ -1,0 +1,84 @@
+# The checks every push to main and every pull request runs. Kept small on purpose: one Rust job, the SQL suite on each
+# supported Postgres, and the daemon against a real SpiceDB.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: cargo test and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  sql:
+    name: SQL suite, Postgres ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: rebac
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 1s --health-timeout 5s --health-retries 30
+    env:
+      REBAC_TEST_URL: postgres://postgres:rebac@127.0.0.1:55433
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/sql/run.sh
+      # THE REVOCATION RACES, repeated: two sessions (dblink) race a refresh against a revocation in both orders, and
+      # a held lock fails the commit (fault injection). Deterministic by construction; repeated to catch a regression
+      # that only loses sometimes.
+      - name: revocation vs refresh races, 20 rounds
+        run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' || exit 1; done
+
+  integration:
+    name: rebacd against SpiceDB
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: rebac
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 1s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      # A service container cannot be given `serve` and its flags, so SpiceDB is started here (the compose file's).
+      - name: SpiceDB
+        run: |
+          docker run -d --name spicedb -p 50061:50051 authzed/spicedb:v1.56.2 \
+            serve --grpc-preshared-key rebac-test-key --datastore-engine memory
+          for i in $(seq 60); do
+            docker exec spicedb grpc_health_probe -addr=:50051 >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          docker logs spicedb; exit 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: REBAC_IT=1 cargo test --locked -p rebacd --test integration
