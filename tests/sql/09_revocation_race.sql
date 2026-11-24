@@ -35,8 +35,8 @@ begin
   end loop;
 end $$;
 
-select dblink_connect('a', 'dbname=' || current_database() || ' user=' || current_user);
-select dblink_connect('b', 'dbname=' || current_database() || ' user=' || current_user);
+select dblink_connect('a', t.conn());
+select dblink_connect('b', t.conn());
 create temp table b_pid as select * from dblink('b', 'select pg_backend_pid()') as x(pid int);
 
 -- 1. An arrow tuple removed: file-1 leaves space-9 while dee's refresh (which still sees it in SpiceDB) is in flight.

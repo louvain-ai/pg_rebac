@@ -62,3 +62,14 @@ language sql as $$
   select t.fixture_relations();
   insert into rebac.view_relation (resource_type, relation, kind) values ('group', 'member', 'set');
 $$;
+
+-- A dblink connection string back to this database as this role. A role that is not a superuser must authenticate
+-- with a password (dblink refuses otherwise), so in owner mode run.sh supplies one as t.dblink_password, and the
+-- connection goes to the address this session came in on, never loopback, which a container may trust without one.
+create or replace function t.conn() returns text
+language sql as $$
+  select 'dbname=' || current_database() || ' user=' || current_user
+         || case when coalesce(current_setting('t.dblink_password', true), '') = '' then ''
+                 else ' host=' || host(inet_server_addr()) || ' port=' || inet_server_port()
+                      || ' password=' || current_setting('t.dblink_password') end
+$$;

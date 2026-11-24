@@ -50,8 +50,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: tests/sql/run.sh
-      # Hosted Postgres installs as a database owner that is not a superuser: that must work, with and without pgvector.
+      # Hosted Postgres installs as a database owner that is not a superuser: that must work, with and without pgvector
+      # (install_as_owner.sh), and the whole suite must pass as that role (a superuser only creates the extensions).
       - run: tests/sql/install_as_owner.sh
+      - name: SQL suite as a non-superuser owner
+        run: REBAC_TEST_AS_OWNER=1 tests/sql/run.sh
       # THE REVOCATION RACES, repeated: two sessions (dblink) race a refresh against a revocation in both orders, and
       # a held lock fails the commit (fault injection); 13 races one against a revocation applied from Watch. Deterministic by construction; repeated to catch a regression
       # that only loses sometimes.

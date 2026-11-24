@@ -6,7 +6,7 @@ select t.beat();
 set rebac.tenant = 'acme';
 select rebac.project('acme', 'lk', array['q1'], 't');
 update rebac.config set value = '300' where key = 'narrow_lock_timeout_ms';
-select dblink_connect('other', 'dbname=' || current_database() || ' user=' || current_user);
+select dblink_connect('other', t.conn());
 select dblink_exec('other', 'begin');
 select * from dblink('other', $$ select rebac.lock_principal('acme', 'lk')::text $$) as x(v text);
 select t.raises($$ select rebac.write('delete', 'container:acme/q1', 'member', 'user:acme/lk'); set constraints all immediate $$,

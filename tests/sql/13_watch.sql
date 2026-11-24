@@ -111,8 +111,8 @@ begin
     perform pg_sleep(0.001);
   end loop;
 end $$;
-select dblink_connect('a', 'dbname=' || current_database() || ' user=' || current_user);
-select dblink_connect('b', 'dbname=' || current_database() || ' user=' || current_user);
+select dblink_connect('a', t.conn());
+select dblink_connect('b', t.conn());
 create temp table b_pid as select * from dblink('b', 'select pg_backend_pid()') as x(pid int);
 select dblink_exec('a', 'begin');
 select * from dblink('a', $$ select rebac.lock_principal('acme', 'jo')::text $$) as x(v text);
