@@ -12,7 +12,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=rebac test CA" \
   -keyout "$DIR/ca.key" -out "$DIR/ca.pem" 2>/dev/null
 openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout "$DIR/server.key" -out "$DIR/server.csr" 2>/dev/null
 printf 'subjectAltName=DNS:localhost\n' > "$DIR/ext.cnf"
-openssl x509 -req -in "$DIR/server.csr" -CA "$DIR/ca.pem" -CAkey "$DIR/ca.key" -CAcreateserial -days 2 \
+openssl x509 -req -in "$DIR/server.csr" -CA "$DIR/ca.pem" -CAkey "$DIR/ca.key" -CAcreateserial -CAserial "$DIR/ca.srl" -days 2 \
   -extfile "$DIR/ext.cnf" -out "$DIR/server.crt" 2>/dev/null
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" -p 127.0.0.1:55434:5432 -e POSTGRES_PASSWORD=rebac -v "$DIR:/certs:ro" \
