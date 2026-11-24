@@ -106,6 +106,55 @@ const description =
         </figure>
       </section>
 
+      <section class="install" aria-labelledby="install">
+        <h2 id="install">Try it in one command</h2>
+        <p class="section-lede">
+          With Docker (Compose 2.23 or later), and nothing to clone. It starts Postgres with pgvector, SpiceDB and <code>rebacd</code>, installs
+          the released SQL, writes the relationships through <code>rebac.write</code>, and runs one vector search as two
+          people.
+        </p>
+        <pre class="code block"><code>curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo</code></pre>
+        <p class="transcript-label">What it prints, abridged:</p>
+        <pre class="code block transcript"><code><span class="c">1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:</span>
+
+   as alice (reads handbook and payroll)
+   handbook  | Annual pay review
+   payroll   | Salary bands 2026
+   handbook  | Pay days
+   payroll   | Payroll cut-off
+   payroll   | Overtime pay
+
+   as bob (reads handbook and deals)
+   handbook  | Annual pay review
+   handbook  | Pay days
+   deals     | Commission plan
+   deals     | Reseller pay terms
+   handbook  | Expenses
+
+<span class="c">2. Filtering AFTER retrieval instead: the top 5 for everyone, then drop what bob may not read.</span>
+   rows_left_for_bob: <mark>1</mark>          <span class="c">-- board passages took 4 of the 5 places</span>
+
+<span class="c">3. Revoke bob from deals. In force when its transaction commits, before rebacd relays it:</span>
+   bob, the same search again
+   handbook  | Annual pay review
+   handbook  | Pay days
+   handbook  | Expenses
+
+<span class="c">4. A principal nobody has asked about is an error (RB404), never an empty set:</span>
+   ERROR:  rebac: this principal has not been projected</code></pre>
+        <h3 class="next-title">Next steps</h3>
+        <ul class="next">
+          <li><strong>Install into your own Postgres 14+:</strong> <code>psql -v ON_ERROR_STOP=1 -f sql/rebac.sql</code>, no extension needed, hosted or not.</li>
+          <li><strong>From your migrations:</strong> <code>npm i pg-rebac</code> bundles the same SQL with a <code>migrate</code> function.</li>
+          <li><strong>The daemon:</strong> <code>docker pull ghcr.io/louvain-ai/rebacd</code> or <code>cargo install rebacd</code>.</li>
+        </ul>
+        <p class="install-links">
+          <a href="/docs/getting-started/">Getting started</a>
+          <a href="/docs/schema-support/">Supported SpiceDB schemas</a>
+          <a href="/docs/faq/">FAQ</a>
+        </p>
+      </section>
+
       <section class="why" aria-labelledby="why">
         <h2 id="why">Why it exists</h2>
         <div class="facts">
@@ -200,24 +249,38 @@ const description =
         </div>
       </section>
 
-      <section class="install" aria-labelledby="install">
-        <h2 id="install">Install</h2>
-        <pre class="code block"><code><span class="c"># see it work first: Postgres, SpiceDB, rebacd and one query as two people</span>
-docker compose -f examples/quickstart/docker-compose.yml run --rm demo
+      <section class="engine" aria-labelledby="engine">
+        <h2 id="engine">Use it with Louvain Engine</h2>
+        <div class="facts">
+          <article>
+            <p>
+              <a href="https://github.com/louvain-ai/louvain-engine">Louvain Engine</a> is open-source,
+              permission-aware hybrid retrieval for company knowledge. Its <code>@louvain/engine-pg-rebac</code> binding
+              takes each reader's readable set from pg_rebac, so SpiceDB decides who reads which collection.
+            </p>
+            <p class="scope">
+              The engine runs its pgvector and keyword legs narrowed to that set, re-checks every row, and fuses them. A
+              reader pg_rebac was never asked about is looked up through <code>rebacd</code> once; an unavailable
+              projection fails the search instead of returning less. <a
+              href="https://github.com/louvain-ai/louvain-engine/tree/main/examples/pg-rebac">The example</a>
+            </p>
+          </article>
+          <div>
+            <pre class="code block"><code><span class="c"># the engine, Postgres, pg_rebac, SpiceDB and rebacd</span>
+git clone https://github.com/louvain-ai/louvain-engine
+cd louvain-engine &amp;&amp; examples/pg-rebac/run.sh
 
-<span class="c"># the schema, on any Postgres 14+</span>
-psql -v ON_ERROR_STOP=1 -f sql/rebac.sql
+"salary review" as alice:
+  1. salary-bands-2027
+  2. payroll-cut-off
+  3. annual-pay-review
 
-<span class="c"># the daemon</span>
-cargo build --release -p rebacd
-DATABASE_URL=postgres://… SPICEDB_TOKEN=… \
-  ./target/release/rebacd --config rebac.toml run</code></pre>
-        <p class="install-links">
-          <a href="/docs/getting-started/">Getting started</a>
-          <a href="/docs/schema-support/">Supported SpiceDB schemas</a>
-          <a href="/docs/faq/">FAQ</a>
-        </p>
+"salary review" as bob:
+  1. annual-pay-review</code></pre>
+          </div>
+        </div>
       </section>
+
       <section class="users" aria-labelledby="users">
         <h2 id="users">Users</h2>
         <ul>

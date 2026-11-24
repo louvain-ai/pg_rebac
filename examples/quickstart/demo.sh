@@ -14,7 +14,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 if [ "$ready" != "alice:handbook,payroll bob:deals,handbook" ]; then
-  echo "rebacd did not project alice and bob within 60 s; see: docker compose -f examples/quickstart/docker-compose.yml logs rebacd" >&2
+  echo "rebacd did not project alice and bob within 60 s; see the rebacd service's logs (docker compose ... logs rebacd)" >&2
   exit 1
 fi
 

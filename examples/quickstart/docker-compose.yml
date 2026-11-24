@@ -1,6 +1,6 @@
 # The quickstart: Postgres with pgvector, SpiceDB, the rebacd daemon and a demo that runs one query as two people.
 #   docker compose -f examples/quickstart/docker-compose.yml run --rm demo
-#   docker compose -f examples/quickstart/docker-compose.yml down        # stop it and forget everything
+#   docker compose -f examples/quickstart/docker-compose.yml down -v     # stop it and forget everything
 # Nothing listens on the host. The SpiceDB key and the Postgres password are throwaway values for this demo only.
 name: pg_rebac_quickstart
 services:

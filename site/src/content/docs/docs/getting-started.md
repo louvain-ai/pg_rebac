@@ -7,17 +7,64 @@ Everything on this page was run against Postgres 17 with pgvector 0.8.
 
 ## See it work in one command
 
-With Docker and a clone of the repository:
+With Docker (Compose 2.23 or later), and nothing to clone:
 
 ```sh
-docker compose -f examples/quickstart/docker-compose.yml run --rm demo
+curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo
 ```
 
-It starts Postgres with pgvector, SpiceDB in memory and `rebacd`, installs `sql/rebac.sql`, writes a small dataset's
-relationships through `rebac.write`, waits for the daemon to project two people, and runs one search as each of them.
-It then shows the same search filtered after retrieval, a revocation in force at commit, and `RB404` for a principal
-nobody has asked about. `docker compose -f examples/quickstart/docker-compose.yml down` forgets it all. The rest of
-this page does the same by hand, without the daemon.
+It starts Postgres with pgvector, SpiceDB (in memory) and the released `rebacd` image, installs the release's SQL
+(checked against its SHA-256), writes a small dataset's relationships through `rebac.write`, and waits for the daemon
+to relay them to SpiceDB and project two people. Then it runs one vector search as each of them (over three-number embeddings written by
+hand, so it needs no model). What you see, abridged:
+
+```text
+1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:
+
+   as alice (reads handbook and payroll)
+ container |       title
+-----------+-------------------
+ handbook  | Annual pay review
+ payroll   | Salary bands 2026
+ handbook  | Pay days
+ payroll   | Payroll cut-off
+ payroll   | Overtime pay
+
+   as bob (reads handbook and deals)
+ container |       title
+-----------+--------------------
+ handbook  | Annual pay review
+ handbook  | Pay days
+ deals     | Commission plan
+ deals     | Reseller pay terms
+ handbook  | Expenses
+
+2. Filtering AFTER retrieval instead: take the top 5 for everyone, then drop what bob may not read.
+   Passages bob cannot read (board) take 4 of the 5 places. bob asked for 5 rows and gets back:
+ rows_left_for_bob
+-------------------
+                 1
+
+3. Revoke bob from deals. The revocation is in force when its transaction commits, before rebacd relays it:
+   bob, the same search again
+ container |       title
+-----------+-------------------
+ handbook  | Annual pay review
+ handbook  | Pay days
+ handbook  | Expenses
+
+4. A principal nobody has asked about is an error (RB404), never an empty set:
+ERROR:  rebac: this principal has not been projected
+```
+
+The first run pulls four images; after that a run takes about six seconds. Nothing listens on your host, and
+`curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v` stops it and forgets everything. The file
+is generated from [`examples/quickstart/`](https://github.com/louvain-ai/pg_rebac/tree/main/examples/quickstart) by `bundle.sh`; from a clone,
+`docker compose -f examples/quickstart/docker-compose.yml run --rm demo` runs the same demo with `rebacd` built from
+source.
+
+The rest of this page does the same by hand, without the daemon: install the SQL, project a readable set, fence a
+pgvector query.
 
 ## Install the SQL
 
@@ -123,3 +170,34 @@ candidates and the fence silently returns fewer than k rows ([measured](/docs/pe
 - Keep the projection in step with SpiceDB: [rebacd](/docs/rebacd/).
 - Write relationships through `rebac.write` so revocations are in force at commit:
   [revocations and consistency](/docs/concepts/consistency/).
+- Retrieval with the fence built in: [use it with Louvain Engine](#use-it-with-louvain-engine).
+
+## Use it with Louvain Engine
+
+[Louvain Engine](https://github.com/louvain-ai/louvain-engine) is open-source, permission-aware hybrid retrieval for
+company knowledge. Its `@louvain/engine-pg-rebac` binding takes each reader's readable set from pg_rebac, so SpiceDB
+decides who reads which collection: the engine runs its pgvector and keyword legs narrowed to that set, re-checks every
+row, and fuses them. A reader pg_rebac was never asked about is looked up through `rebacd` once; an unavailable
+projection fails the search instead of returning less.
+
+The engine's [`examples/pg-rebac`](https://github.com/louvain-ai/louvain-engine/tree/main/examples/pg-rebac) runs the
+whole stack (the engine, Postgres, pg_rebac's SQL, SpiceDB and `rebacd`) from its repository root, with Docker,
+Node 22 and pnpm 10:
+
+```sh
+git clone https://github.com/louvain-ai/louvain-engine && cd louvain-engine
+examples/pg-rebac/run.sh
+```
+
+```text
+"salary review" as alice:
+  1. salary-bands-2027
+  2. payroll-cut-off
+  3. annual-pay-review
+
+"salary review" as bob:
+  1. annual-pay-review
+
+"salary review" as mallory:
+  (nothing this person may read)
+```

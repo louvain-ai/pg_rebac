@@ -18,7 +18,7 @@ inside the Postgres plan, before the `order by` and the `limit`.
 [![Docs: pgrebac.com](https://img.shields.io/badge/docs-pgrebac.com-4a3fd0)](https://pgrebac.com)
 
 <p align="center">
-  <img src="docs/img/two-readers.svg" width="760" alt="The same full-text query run as two people. alice, who reads handbook and payroll, gets five rows from those two containers; bob, who reads handbook and deals, gets five rows from his. Filtered after retrieval instead, bob would get one row of five, because rows from containers he cannot read (board and payroll) take the other four places.">
+  <img src="docs/img/two-readers.svg" width="760" alt="The same vector search run as two people. alice, who reads handbook and payroll, gets five rows from those two containers; bob, who reads handbook and deals, gets five rows from his. Filtered after retrieval instead, bob would get one row of five, because rows from a container he cannot read (board) take the other four places.">
 </p>
 
 SpiceDB stays the authority for who may read what. pg_rebac keeps a local, indexed projection of one permission, and
@@ -38,25 +38,98 @@ same plan as a pgvector ordering, a full-text match or anything else, and applie
 
 ## Try it in one command
 
-You need Docker with Compose. From a clone:
+With Docker (Compose 2.23 or later), and nothing to clone:
 
 ```sh
-docker compose -f examples/quickstart/docker-compose.yml run --rm demo
+curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo
 ```
 
-It starts Postgres with pgvector, SpiceDB (in memory) and the `rebacd` daemon (built from this repository), installs
-`sql/rebac.sql`, seeds a small dataset through `rebac.write`, waits for the daemon to relay it to SpiceDB and project
-two people, then shows:
+It starts Postgres with pgvector, SpiceDB (in memory) and the released `rebacd` image, installs the release's SQL
+(checked against its SHA-256), writes a small dataset's relationships through `rebac.write`, and waits for the daemon
+to relay them to SpiceDB and project two people. Then it runs one vector search as each of them (over three-number embeddings written by
+hand, so it needs no model). What you see, abridged:
 
-1. the same search as `alice` and as `bob`, each getting five rows from what they may read;
-2. the same search filtered after retrieval instead, where `bob` gets one row of five;
-3. a revocation in force when its transaction commits, before the daemon has relayed it;
-4. a principal nobody has asked about failing with `RB404`, never an empty set.
+```text
+1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:
 
-The first run pulls the Rust, Postgres and SpiceDB base images and builds the daemon (42 s for the build on a
-10-core laptop, measured from a fresh clone with no build cache); after that a run takes about five seconds. Every file it uses is in
-[`examples/quickstart/`](examples/quickstart/). `docker compose -f examples/quickstart/docker-compose.yml down` stops it
-and forgets everything; nothing listens on your host.
+   as alice (reads handbook and payroll)
+ container |       title
+-----------+-------------------
+ handbook  | Annual pay review
+ payroll   | Salary bands 2026
+ handbook  | Pay days
+ payroll   | Payroll cut-off
+ payroll   | Overtime pay
+
+   as bob (reads handbook and deals)
+ container |       title
+-----------+--------------------
+ handbook  | Annual pay review
+ handbook  | Pay days
+ deals     | Commission plan
+ deals     | Reseller pay terms
+ handbook  | Expenses
+
+2. Filtering AFTER retrieval instead: take the top 5 for everyone, then drop what bob may not read.
+   Passages bob cannot read (board) take 4 of the 5 places. bob asked for 5 rows and gets back:
+ rows_left_for_bob
+-------------------
+                 1
+
+3. Revoke bob from deals. The revocation is in force when its transaction commits, before rebacd relays it:
+   bob, the same search again
+ container |       title
+-----------+-------------------
+ handbook  | Annual pay review
+ handbook  | Pay days
+ handbook  | Expenses
+
+4. A principal nobody has asked about is an error (RB404), never an empty set:
+ERROR:  rebac: this principal has not been projected
+```
+
+The first run pulls four images; after that a run takes about six seconds. Nothing listens on your host, and
+`curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v` stops it and forgets everything. The file
+is generated from [`examples/quickstart/`](examples/quickstart/) by `bundle.sh`; from a clone,
+`docker compose -f examples/quickstart/docker-compose.yml run --rm demo` runs the same demo with `rebacd` built from
+source.
+
+**Next steps:**
+
+- Install the SQL into your own Postgres 14+: `psql -v ON_ERROR_STOP=1 -f sql/rebac.sql`, or `npm i pg-rebac` and
+  run its `migrate` from your migrations ([Install on your own Postgres](#install-on-your-own-postgres)).
+- Run the daemon: `docker pull ghcr.io/louvain-ai/rebacd`, or `cargo install rebacd`.
+- Read [Getting started](https://pgrebac.com/docs/getting-started/), then fence your first pgvector query.
+
+## Use it with Louvain Engine
+
+[Louvain Engine](https://github.com/louvain-ai/louvain-engine) is open-source, permission-aware hybrid retrieval for
+company knowledge. Its `@louvain/engine-pg-rebac` binding takes each reader's readable set from pg_rebac, so SpiceDB
+decides who reads which collection: the engine runs its pgvector and keyword legs narrowed to that set, re-checks every
+row, and fuses them. A reader pg_rebac was never asked about is looked up through `rebacd` once; an unavailable
+projection fails the search instead of returning less.
+
+The engine's [`examples/pg-rebac`](https://github.com/louvain-ai/louvain-engine/tree/main/examples/pg-rebac) runs the
+whole stack (the engine, Postgres, pg_rebac's SQL, SpiceDB and `rebacd`) from its repository root, with Docker,
+Node 22 and pnpm 10:
+
+```sh
+git clone https://github.com/louvain-ai/louvain-engine && cd louvain-engine
+examples/pg-rebac/run.sh
+```
+
+```text
+"salary review" as alice:
+  1. salary-bands-2027
+  2. payroll-cut-off
+  3. annual-pay-review
+
+"salary review" as bob:
+  1. annual-pay-review
+
+"salary review" as mallory:
+  (nothing this person may read)
+```
 
 ## Why not just filter results after retrieval?
 
@@ -200,6 +273,8 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push t
 - the SQL suite on Postgres 14, 15, 16 and 17 with pgvector;
 - 20 rounds of the revocation-versus-refresh races and the held-lock fault (`tests/sql/run.sh '0[69]_*'`);
 - the daemon against a real SpiceDB (`REBAC_IT=1`).
+- the quickstart both ways, checked by `examples/quickstart/check-output.sh`: the file pgrebac.com serves (which must be
+  what `examples/quickstart/bundle.sh` writes) and the demo built from the commit.
 
 The TLS test runs locally only.
 

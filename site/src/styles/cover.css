@@ -139,7 +139,7 @@ figcaption {
 
 /* Sections */
 section + section { border-top: 1px solid var(--line); }
-.why, .answers, .parts, .install { padding-top: 56px; padding-bottom: 64px; }
+.why, .answers, .parts, .install, .engine { padding-top: 56px; padding-bottom: 64px; }
 h2 { font-size: clamp(1.5rem, 2.4vw, 2rem); letter-spacing: -0.02em; line-height: 1.15; font-weight: 620; margin: 0 0 28px; max-width: 26em; }
 h3 { font-size: 1.2rem; letter-spacing: -0.01em; line-height: 1.25; font-weight: 620; margin: 0 0 10px; }
 .section-lede { color: var(--muted); margin: -12px 0 28px; max-width: 40em; }
@@ -158,6 +158,15 @@ h3 { font-size: 1.2rem; letter-spacing: -0.01em; line-height: 1.25; font-weight:
 .answers dd strong { color: var(--ink); font-weight: 620; }
 
 .install .block { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); max-width: 760px; font-size: 14px; padding-top: 16px; }
+.engine .block { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); font-size: 13px; padding-top: 16px; }
+.transcript-label { margin: 20px 0 8px; font-size: 14.5px; color: var(--muted); }
+.install .transcript { font-size: 12.5px; }
+.next-title { margin-top: 32px; }
+.next { margin: 0; padding-left: 1.2em; max-width: 48em; }
+.next li { margin: 0 0 8px; color: var(--muted); }
+.next strong { color: var(--ink); font-weight: 620; }
+.next code { white-space: normal; overflow-wrap: anywhere; }
+.engine .facts > * { min-width: 0; }
 .install-links { display: flex; flex-wrap: wrap; gap: 24px; margin: 20px 0 0; font-size: 15px; }
 
 .foot {
@@ -194,7 +203,7 @@ h3 { font-size: 1.2rem; letter-spacing: -0.01em; line-height: 1.25; font-weight:
   .code { font-size: 12px; padding-left: 12px; padding-right: 12px; }
   figcaption { padding-left: 12px; }
   .answers dl > div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-  .why, .answers, .parts, .install { padding-top: 40px; padding-bottom: 48px; }
+  .why, .answers, .parts, .install, .engine { padding-top: 40px; padding-bottom: 48px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 

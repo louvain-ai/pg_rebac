@@ -18,8 +18,9 @@ may not see.
   the filter says something about rows the reader may not view. With the fence in the `where` clause, no such row is
   ranked, counted or returned.
 
-The quickstart shows the first point on seventeen rows: `docker compose -f examples/quickstart/docker-compose.yml run
---rm demo` runs one search as two people, then filters after retrieval, and the second person gets one row of five.
+The [quickstart](/docs/getting-started/#see-it-work-in-one-command) shows the first point on seventeen rows:
+`curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo` runs one vector search as two
+people, then filters after retrieval, and the second person gets one row of five.
 
 ## Why not plain row-level security?
 

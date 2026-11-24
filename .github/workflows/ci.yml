@@ -87,3 +87,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: REBAC_IT=1 cargo test --locked -p rebacd --test integration
+
+  # THE QUICKSTART, both ways: the one-file demo pgrebac.com serves (released image and SQL), which must be what
+  # examples/quickstart/ would generate, and the from-clone demo with rebacd built from this commit. Each must show bob
+  # one row of five after retrieval and the revocation in force at commit.
+  quickstart:
+    name: quickstart, served and from a clone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: examples/quickstart/bundle.sh --check
+      - name: The served file, piped as a reader runs it
+        run: |
+          cd "$(mktemp -d)"
+          docker compose -f - run --rm demo < "$GITHUB_WORKSPACE/site/public/quickstart.yml" 2>&1 | tee out
+          "$GITHUB_WORKSPACE/examples/quickstart/check-output.sh" out
+          docker compose -f - down -v < "$GITHUB_WORKSPACE/site/public/quickstart.yml"
+      - name: From a clone
+        run: |
+          docker compose -f examples/quickstart/docker-compose.yml run --rm demo 2>&1 | tee out
+          examples/quickstart/check-output.sh out

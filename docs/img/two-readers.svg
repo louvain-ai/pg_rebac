@@ -3,9 +3,9 @@
 <rect width="760" height="498" rx="14" fill="#0e0d1c"/>
 <text x="24" y="42" fill="#f5f5f7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600">One query, two readers</text>
 <rect x="24" y="60" width="712" height="86" rx="8" fill="#1c1a3a"/>
-<text x="40" y="86" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">where tsv @@ websearch_to_tsquery(&#x27;salary or pay or review&#x27;)</text>
-<text x="40" y="108" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">  and container in (select * from rebac.readable_set(:who))</text>
-<text x="40" y="130" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">order by ts_rank(...) desc limit 5</text>
+<text x="40" y="86" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">select title from passage</text>
+<text x="40" y="108" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">where container in (select * from rebac.readable_set(:who))</text>
+<text x="40" y="130" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">order by embedding &lt;=&gt; :query limit 5   -- &quot;salary pay review&quot;</text>
 <rect x="24" y="170" width="344" height="222" rx="10" fill="#16152b" stroke="#2c2a52"/>
 <text x="40" y="198" fill="#f5f5f7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600">alice</text>
 <text x="40" y="217" fill="#9ca3af" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5">reads: handbook, payroll</text>
@@ -19,10 +19,10 @@
 <text x="46" y="305" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">3. Pay days</text>
 <text x="346" y="305" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">handbook</text>
 <rect x="36" y="318" width="320" height="24" rx="5" fill="#221f45"/>
-<text x="46" y="335" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">4. Overtime pay</text>
+<text x="46" y="335" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">4. Payroll cut-off</text>
 <text x="346" y="335" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">payroll</text>
 <rect x="36" y="348" width="320" height="24" rx="5" fill="#221f45"/>
-<text x="46" y="365" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">5. Payroll cut-off</text>
+<text x="46" y="365" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">5. Overtime pay</text>
 <text x="346" y="365" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">payroll</text>
 <rect x="392" y="170" width="344" height="222" rx="10" fill="#16152b" stroke="#2c2a52"/>
 <text x="408" y="198" fill="#f5f5f7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600">bob</text>
@@ -34,15 +34,15 @@
 <text x="414" y="275" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">2. Pay days</text>
 <text x="714" y="275" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">handbook</text>
 <rect x="404" y="288" width="320" height="24" rx="5" fill="#221f45"/>
-<text x="414" y="305" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">3. Reseller pay terms</text>
+<text x="414" y="305" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">3. Commission plan</text>
 <text x="714" y="305" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">deals</text>
 <rect x="404" y="318" width="320" height="24" rx="5" fill="#221f45"/>
-<text x="414" y="335" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">4. Kestrel renewal</text>
+<text x="414" y="335" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">4. Reseller pay terms</text>
 <text x="714" y="335" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">deals</text>
 <rect x="404" y="348" width="320" height="24" rx="5" fill="#221f45"/>
-<text x="414" y="365" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">5. Commission plan</text>
-<text x="714" y="365" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">deals</text>
+<text x="414" y="365" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" xml:space="preserve">5. Expenses</text>
+<text x="714" y="365" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="end">handbook</text>
 <text x="24" y="414" fill="#9ca3af" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">Filtered after retrieval instead (top 5 for everyone, then drop what bob may not read): bob gets 1 row of 5,</text>
-<text x="24" y="436" fill="#9ca3af" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">because rows from containers he cannot read (board, payroll) take the other 4 places. No error says so.</text>
-<text x="24" y="458" fill="#9ca3af" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">Captured from the quickstart: docker compose -f examples/quickstart/docker-compose.yml run --rm demo</text>
+<text x="24" y="436" fill="#9ca3af" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">because rows from a container he cannot read (board) take the other 4 places. No error says so.</text>
+<text x="24" y="458" fill="#9ca3af" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">Captured from the quickstart: curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo</text>
 </svg>
