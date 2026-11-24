@@ -624,40 +624,61 @@ async fn the_daemon_end_to_end() {
     stop_tx.send(true).unwrap();
     w.await.unwrap();
     assert!(!wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst));
-    s.write(
-        &[op(true, "container:acme/ext-2", "member", "user:acme/ext")],
-        Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
+    // Several revocations, each its own revision, so the resumed stream replays them as several messages.
+    let backlog: Vec<String> = (2..8).map(|i| format!("ext-{i}")).collect();
+    for d in &backlog {
+        s.write(
+            &[op(
+                true,
+                &format!("container:acme/{d}"),
+                "member",
+                "user:acme/ext",
+            )],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    }
     project::refresh_one(&ctx, "acme", "ext", None, ctx.config.deadline())
         .await
         .unwrap();
     assert!(set_of(&ctx, "acme", "ext")
         .await
         .contains(&"ext-2".to_string()));
-    s.write(
-        &[op(false, "container:acme/ext-2", "member", "user:acme/ext")],
-        Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
+    for d in &backlog {
+        s.write(
+            &[op(
+                false,
+                &format!("container:acme/{d}"),
+                "member",
+                "user:acme/ext",
+            )],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    }
     let (stop_tx, stop) = tokio::sync::watch::channel(false);
     let w = tokio::spawn(loops::watch_loop(wctx.clone(), stop));
-    let mut resumed = false;
-    for _ in 0..100 {
-        if !set_of(&ctx, "acme", "ext")
-            .await
-            .contains(&"ext-2".to_string())
-        {
-            resumed = true;
+    // THE REPLAY IS NOT CURRENT: the stream is current (and the heartbeat may beat) only once SpiceDB's checkpoint says
+    // every change through it was delivered, so at the first instant it is current, the whole backlog is narrowed.
+    let mut current = false;
+    for _ in 0..400 {
+        if wctx.watch_current.load(std::sync::atomic::Ordering::SeqCst) {
+            current = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    assert!(current, "the resumed stream catches up");
+    let left: Vec<String> = set_of(&ctx, "acme", "ext")
+        .await
+        .into_iter()
+        .filter(|c| backlog.contains(c))
+        .collect();
     assert!(
-        resumed,
-        "a revocation made while Watch was down is applied on resume"
+        left.is_empty(),
+        "every revocation made while Watch was down is applied before the stream counts as current: {left:?}"
     );
 
     // A POSITION SPICEDB REFUSES restarts from head with a gap: sets looked up before fail closed, the sweep is forced.

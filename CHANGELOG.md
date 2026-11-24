@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- **Reads stay closed through a Watch replay (fix).** In 0.2.0 a reconnected Watch stream counted as current, and
+  the heartbeat resumed, after its first replayed message, so reads reopened while revocations made during the outage
+  were still being applied. The daemon now touches a marker relationship (`<resource_type>:__rebac_watch_marker`) when
+  the stream opens and counts it current only once Watch delivers the marker's revision.
+
 ## 0.2.0
 
 - **Benchmarks: the alternatives.** `examples/hybrid-pgvector-realistic/alternatives.py` measures row-level security

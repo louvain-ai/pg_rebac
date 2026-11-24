@@ -41,6 +41,9 @@ The SQL is installed separately, with `psql` or your migrations. No published im
   applied, the heartbeat stops, so reads fail closed. In 0.1.x Watch only counts such writes, and the sweep narrows
   them.
   A schema change on the stream starts a closure re-check at once, and the stream reopens on the new closure's types.
+  A reopened stream replays what happened while it was down, and reads stay closed until the whole replay is applied:
+  the daemon touches a marker relationship (`<resource_type>:__rebac_watch_marker`) when the stream opens, and counts
+  the stream current only once Watch delivers that marker.
 - **Closure.** Re-reads the live schema every `closure_check_ms` (10 seconds), and at once on Watch's notice, so a
   schema change is caught with `watch = false` too. See [schema changes while running](#schema-changes-while-running).
 - **HTTP.** `POST /lookup`, `GET /healthz` and `GET /status` on `listen`.
