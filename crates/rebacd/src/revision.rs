@@ -1,11 +1,11 @@
-//! Comparing SpiceDB revisions, read from ZedTokens, so the Watch loop can tell when a resumed stream has delivered
+//! Comparing `SpiceDB` revisions, read from `ZedTokens`, so the Watch loop can tell when a resumed stream has delivered
 //! everything up to a revision read at the head (`SpiceDb::head_revision`).
 //!
-//! A ZedToken is base64 of a `DecodedZedToken` protobuf whose `v1` (field 3) holds the datastore's revision string
+//! A `ZedToken` is base64 of a `DecodedZedToken` protobuf whose `v1` (field 3) holds the datastore's revision string
 //! (field 1). Within one datastore revisions are ordered, and their strings take one of two shapes:
 //!
 //! - a DECIMAL (`1795557137917555507`, or `1795557137917555507.0000000001`): the in-memory datastore, and the shape
-//!   MySQL, CockroachDB and Spanner write. Ordered as numbers.
+//!   `MySQL`, `CockroachDB` and Spanner write. Ordered as numbers.
 //! - base64 of a Postgres snapshot (`xmin` field 1, `relative_xmax` field 2, the in-progress list after): the Postgres
 //!   datastore. A snapshot S has seen every transaction that a head snapshot H had seen once `S.xmin >= H.xmax`: every
 //!   transaction below S.xmin has finished, and every one H had seen is below H.xmax. That is conservative (S may have
@@ -24,7 +24,8 @@ pub enum Revision {
     Snapshot { xmin: u64, xmax: u64 },
 }
 
-/// The revision a ZedToken names, or None for a token this module cannot read.
+/// The revision a `ZedToken` names, or None for a token this module cannot read.
+#[must_use]
 pub fn of_token(token: &str) -> Option<Revision> {
     let bytes = STANDARD.decode(token.trim()).ok()?;
     let v1 = field_bytes(&bytes, 3)?;
@@ -33,6 +34,7 @@ pub fn of_token(token: &str) -> Option<Revision> {
 }
 
 /// A datastore revision string.
+#[must_use]
 pub fn parse(rev: &str) -> Option<Revision> {
     let (int, frac) = rev.split_once('.').unwrap_or((rev, ""));
     if !int.is_empty()
@@ -45,17 +47,18 @@ pub fn parse(rev: &str) -> Option<Revision> {
     }
     let snap = STANDARD.decode(rev).ok()?;
     let xmin = field_varint(&snap, 1)?;
-    let rel = field_varint(&snap, 2).unwrap_or(0) as i64;
-    let xmax = if rel >= 0 {
-        xmin.checked_add(rel as u64)?
-    } else {
+    // `relative_xmax` is an int64; a negative one arrives as a varint at or above 2^63, which no snapshot has.
+    let rel = field_varint(&snap, 2).unwrap_or(0);
+    if i64::try_from(rel).is_err() {
         return None;
-    };
+    }
+    let xmax = xmin.checked_add(rel)?;
     Some(Revision::Snapshot { xmin, xmax })
 }
 
 /// Whether a stream at `through` has delivered everything up to `head`: Some(true) or Some(false), or None when the
 /// two cannot be compared (different shapes, or an unreadable token).
+#[must_use]
 pub fn covers(through: &Revision, head: &Revision) -> Option<bool> {
     match (through, head) {
         (Revision::Decimal(ti, tf), Revision::Decimal(hi, hf)) => {

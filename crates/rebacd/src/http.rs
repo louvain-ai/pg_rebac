@@ -66,6 +66,7 @@ async fn require_token(
 }
 
 /// Equal, in time that depends only on the lengths: a token is never compared byte by byte with an early exit.
+#[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = (a.len() ^ b.len()) as u8 | u8::from(a.len() != b.len());
     for i in 0..a.len().max(b.len()) {

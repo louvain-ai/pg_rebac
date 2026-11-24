@@ -292,11 +292,11 @@ async fn resume_position(ctx: &Ctx) -> anyhow::Result<Option<String>> {
     })
 }
 
-/// EVERY type is watched (an empty filter). rebac.apply_watch skips relations outside the closure, and watching all of
+/// EVERY type is watched (an empty filter). `rebac.apply_watch` skips relations outside the closure, and watching all of
 /// them means every revision past a stored position carries something the stream delivers, which is what lets a
 /// resumed stream compare its position with the head exactly (an idle store's head is its last delivered revision).
-async fn types_watched(_ctx: &Ctx) -> anyhow::Result<Vec<String>> {
-    Ok(vec![])
+fn types_watched() -> Vec<String> {
+    Vec::new()
 }
 
 /// Make sure a Watch position is stored, restarting from head (with a gap) when none is. The backfill calls this
@@ -453,7 +453,7 @@ fn watch_rows(
 
 async fn watch_once(ctx: &Ctx, stop: &mut watch::Receiver<bool>) -> anyhow::Result<Resume> {
     let mut from = resume_position(ctx).await?;
-    let types = types_watched(ctx).await?;
+    let types = types_watched();
     let apply = ctx.config.mode == Mode::Live;
     // NO POSITION TO RESUME: restart from SpiceDB's head revision, read directly, and record the gap before anything
     // is applied, so the stream below is an ordinary resumed one (an idle store may send a stream opened at "now"

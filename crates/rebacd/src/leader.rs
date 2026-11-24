@@ -21,8 +21,9 @@ use tokio::sync::watch;
 
 /// The advisory lock's first key. 1919050595 is the tenant locks' space; this one is its own. The second key is the
 /// mode's: 1 for live, 2 for shadow, so a shadow daemon never holds the live leader's lock.
-pub const LOCK_SPACE: i32 = 1919050596;
+pub const LOCK_SPACE: i32 = 1_919_050_596;
 
+#[must_use]
 pub fn lock_key(ctx: &Ctx) -> i32 {
     match ctx.config.mode {
         crate::config::Mode::Live => 1,
@@ -101,11 +102,13 @@ async fn try_acquire(ctx: &Ctx) -> anyhow::Result<Option<(tokio_postgres::Client
 }
 
 /// True when this daemon may run the leader's work: it holds the lock, or leader election is off.
+#[must_use]
 pub fn is_leader(ctx: &Ctx) -> bool {
     !ctx.config.leader_election || ctx.leader_pid.load(Ordering::SeqCst) != 0
 }
 
 /// The pid `rebac.assert_leader` checks: the lock connection's, or 0 (no check) with leader election off.
+#[must_use]
 pub fn fence_pid(ctx: &Ctx) -> i32 {
     if ctx.config.leader_election {
         ctx.leader_pid.load(Ordering::SeqCst).max(-1)
