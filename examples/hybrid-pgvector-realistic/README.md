@@ -21,6 +21,10 @@ raise `--shm-size` for a container). `bench.py` keeps the exact ground truth in 
 (`--retruth` recomputes it; the first run spends most of its time there). `--skip-concurrency`, `--tx`, `--seconds`
 shorten a run.
 
+`alternatives.py` runs on the same database: `--rls` compares the fence in the query with row-level security
+(`rebac.enable_rls`, a naive `exists` policy, a per-row check function), and `--overfetch` measures fetching the
+unfenced top N and filtering it. Results and method are in `docs/planner.md`, "The alternatives".
+
 ## What is in the data
 
 - Container sizes follow size(r) ~ 1 / (r + 30): the largest holds about 2,500 passages, the median 8, the smallest 4.

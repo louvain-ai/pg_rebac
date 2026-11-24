@@ -193,7 +193,8 @@ nor the table's owner (both bypass RLS):
 - **query fence**: no policy; `container in (select * from rebac.readable_set(p))` in the query, as above.
 - **rls, set**: `rebac.enable_rls`, a restrictive policy on the same set.
 - **rls, per row**: a policy calling `rebac.readable_by(p, container)`, pg_rebac's own per-row check. It is PL/pgSQL
-  and re-checks the principal (liveness, freshness) for every row, as a call to a check function would. It is local:
+  and calls `rebac.checked(p)` for every row, as a call to a check function would. (`setup.sql` switches the
+  liveness and freshness bounds off, so those two lookups were skipped here; with them on it costs more.) It is local:
   a per-row call to a remote permission service would cost a round trip per row on top, which was not measured.
 - **rls, exists**: the naive inline policy, `exists (select 1 from rebac.readable r where r.tenant = .. and
   r.principal = .. and r.container = passage.container)`.
@@ -301,6 +302,18 @@ measured here.
   relaxed_order`.
 - Route readers below a few thousand candidate rows to the exact path, as
   `container = any(array(select * from rebac.readable_set(p)))`, using `rebac.breadth(p)`.
+- From 0.2.0 (unreleased), `rebac.fenced_ids(p, tbl, q, k)` routes by itself: it counts the reader's candidate rows
+  up to `exact_below_rows` (default 5,000) and sorts them exactly below it, or runs the fenced HNSW scan with
+  `relaxed_order` above it. Measured on the 128-dimension data (k = 20, p50):
+
+  | Candidate rows | Exact | ANN | ANN recall |
+  |---|---|---|---|
+  | 500 | 4.9 ms | 85.7 ms | 0.60 |
+  | 2,000 | 8.3 ms | 25.1 ms | 0.80 |
+  | 5,000 | 14.2 ms | 10.8 ms | 0.92 |
+  | 10,000 | 20.9 ms | 6.1 ms | 0.89 |
+
+  The crossover is 4,000 to 5,000 candidate rows; the 768-dimension run crosses at about 5,000 too.
 - Use custom plans (`plan_cache_mode = force_custom_plan`) for fenced reads, so each plan sees its own reader.
 - Not settled here, and still to measure: a planner support function (C mode) that supplies the per-principal
   selectivity, so the planner can choose the path itself; and Postgres 18. (Skewed containers are covered by the 768-dimension run above.)
