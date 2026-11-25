@@ -6,38 +6,39 @@
 use std::error::Error as StdError;
 
 /// The kind of the first error in the chain this daemon can name.
+#[must_use]
 pub fn kind(e: &(dyn StdError + 'static)) -> String {
-    let mut cur: Option<&(dyn StdError + 'static)> = Some(e);
-    while let Some(err) = cur {
-        if let Some(pg) = err.downcast_ref::<tokio_postgres::Error>() {
-            return match pg.code() {
-                Some(code) => format!("postgres:{}", code.code()),
-                None => "postgres".into(),
-            };
-        }
-        if let Some(st) = err.downcast_ref::<tonic::Status>() {
-            return format!("grpc:{:?}", st.code());
-        }
-        if err.downcast_ref::<deadpool_postgres::PoolError>().is_some() {
-            return "pool".into();
-        }
-        if err.downcast_ref::<std::io::Error>().is_some() {
-            return "io".into();
-        }
-        cur = err.source();
-    }
-    "other".into()
+    std::iter::successors(Some(e), |&err| err.source())
+        .find_map(classify)
+        .unwrap_or_else(|| "other".into())
 }
 
 /// The same for an `anyhow::Error`, which is not itself a `std::error::Error`.
+#[must_use]
 pub fn kind_of(e: &anyhow::Error) -> String {
-    for err in e.chain() {
-        let k = kind(err);
-        if k != "other" {
-            return k;
-        }
+    e.chain()
+        .find_map(classify)
+        .unwrap_or_else(|| "other".into())
+}
+
+/// The kind of this one error, when it is one the daemon can name.
+fn classify(err: &(dyn StdError + 'static)) -> Option<String> {
+    if let Some(pg) = err.downcast_ref::<tokio_postgres::Error>() {
+        return Some(pg.code().map_or_else(
+            || "postgres".into(),
+            |code| format!("postgres:{}", code.code()),
+        ));
     }
-    "other".into()
+    if let Some(st) = err.downcast_ref::<tonic::Status>() {
+        return Some(format!("grpc:{:?}", st.code()));
+    }
+    if err.is::<deadpool_postgres::PoolError>() {
+        return Some("pool".into());
+    }
+    if err.is::<std::io::Error>() {
+        return Some("io".into());
+    }
+    None
 }
 
 #[cfg(test)]

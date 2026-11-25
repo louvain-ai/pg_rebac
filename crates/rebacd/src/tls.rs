@@ -67,7 +67,7 @@ pub fn parse(conn: &str) -> anyhow::Result<(String, Ssl)> {
         u.query_pairs_mut().clear().extend_pairs(kept);
     }
     let ssl = match mode.as_deref() {
-        None | Some("prefer") | Some("allow") => Ssl::Prefer,
+        None | Some("prefer" | "allow") => Ssl::Prefer,
         Some("disable") => Ssl::Disable,
         Some("require") => Ssl::Require,
         Some("verify-full") => Ssl::VerifyFull { root },

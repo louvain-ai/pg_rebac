@@ -1,5 +1,5 @@
-//! TLS to Postgres by `sslmode`, against a real TLS server (`tests/tls/up.sh`). Runs only with REBAC_TLS_IT=1 and
-//! REBAC_TLS_CA (the CA the script prints), and says SKIPPED loudly otherwise.
+//! TLS to Postgres by `sslmode`, against a real TLS server (`tests/tls/up.sh`). Runs only with `REBAC_TLS_IT=1` and
+//! `REBAC_TLS_CA` (the CA the script prints), and says SKIPPED loudly otherwise.
 
 use rebacd::db::pool;
 

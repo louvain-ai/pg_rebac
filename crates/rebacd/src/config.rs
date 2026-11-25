@@ -50,8 +50,8 @@ pub struct Config {
     pub refresh_idle_ms: u64,
     pub sweep_interval_ms: i64,
     pub sweep_settle_ms: i64,
-    /// Follow SpiceDB's Watch and apply changes made outside rebac.write (revocations narrowed at once). On, reads
-    /// also depend on the stream, per principal (rebac.watch_ok, `watch_grace_ms`): a store that cannot serve Watch
+    /// Follow SpiceDB's Watch and apply changes made outside `rebac.write` (revocations narrowed at once). On, reads
+    /// also depend on the stream, per principal (`rebac.watch_ok`, `watch_grace_ms`): a store that cannot serve Watch
     /// fails reads closed, so turn it off there, and such changes then wait for the sweep (G7).
     pub watch: bool,
     /// The oldest applied Watch position the daemon resumes from. Older, it restarts from head with a gap (sets looked
@@ -63,7 +63,7 @@ pub struct Config {
     /// (`<resource_type>:__rebac_watch_marker`) and waits for its revision; for a datastore whose revisions the daemon
     /// cannot compare. Needs a write-capable token and a direct relation that accepts the subject type.
     pub watch_marker: bool,
-    /// Run Watch, the closure check and the sweep only in the daemon holding the leader lock (crate::leader), so
+    /// Run Watch, the closure check and the sweep only in the daemon holding the leader lock (`crate::leader`), so
     /// several daemons can share a database. Off, every daemon runs them (one daemon per database, as before 0.3).
     pub leader_election: bool,
     /// How often a daemon that is not the leader tries the lock.
@@ -113,9 +113,11 @@ impl Config {
             Some(p) => Ok(toml::from_str(&std::fs::read_to_string(p)?)?),
         }
     }
+    #[must_use]
     pub fn deadline(&self) -> Duration {
         Duration::from_millis(self.deadline_ms)
     }
+    #[must_use]
     pub fn read_deadline(&self) -> Duration {
         Duration::from_millis(self.read_deadline_ms)
     }
@@ -127,7 +129,7 @@ impl Config {
             )
         })
     }
-    /// The bearer token `POST /lookup` and `GET /status` require, when `lookup_token_env` names one.
+    /// The bearer token `POST /lookup`, `GET /status` and `GET /metrics` require, when `lookup_token_env` names one.
     pub fn lookup_token(&self) -> anyhow::Result<Option<String>> {
         match &self.lookup_token_env {
             None => Ok(None),

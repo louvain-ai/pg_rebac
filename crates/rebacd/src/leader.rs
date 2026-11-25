@@ -50,7 +50,7 @@ pub async fn leader_loop(ctx: std::sync::Arc<Ctx>, mut stop: watch::Receiver<boo
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::warn!(error = %crate::logs::kind_of(&e), "leader: could not try the lock")
+                    tracing::warn!(error = %crate::logs::kind_of(&e), "leader: could not try the lock");
                 }
             },
             Some(c) => {
@@ -69,7 +69,7 @@ pub async fn leader_loop(ctx: std::sync::Arc<Ctx>, mut stop: watch::Receiver<boo
             }
         }
         let wait = if held.is_some() { check } else { retry };
-        tokio::select! { _ = tokio::time::sleep(wait) => {}, _ = stop.changed() => {} }
+        tokio::select! { () = tokio::time::sleep(wait) => {}, _ = stop.changed() => {} }
     }
     // Stopping: the lock goes with the connection, so the next daemon takes over at once.
     ctx.leader_pid.store(0, Ordering::SeqCst);

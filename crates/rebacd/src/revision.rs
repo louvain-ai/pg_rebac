@@ -74,76 +74,71 @@ pub fn covers(through: &Revision, head: &Revision) -> Option<bool> {
     }
 }
 
-fn varint(b: &[u8], i: &mut usize) -> Option<u64> {
-    let mut v = 0u64;
+/// The varint at `buf[*pos..]`, advancing `pos` past it.
+fn varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
     for shift in (0..64).step_by(7) {
-        let byte = *b.get(*i)?;
-        *i += 1;
-        v |= u64::from(byte & 0x7f) << shift;
+        let byte = *buf.get(*pos)?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
-            return Some(v);
+            return Some(value);
         }
     }
     None
 }
 
-/// Walk a protobuf message's top-level fields, calling `f(field, wire type, varint value, bytes)`.
-fn walk<'a>(b: &'a [u8], mut f: impl FnMut(u64, u64, u64, &'a [u8]) -> bool) -> Option<()> {
-    let mut i = 0;
-    while i < b.len() {
-        let key = varint(b, &mut i)?;
-        let (field, wire) = (key >> 3, key & 7);
-        let stop = match wire {
-            0 => {
-                let v = varint(b, &mut i)?;
-                f(field, wire, v, &[])
-            }
+/// One top-level field's value: a varint (wire type 0) or length-delimited bytes (wire type 2).
+enum Value<'a> {
+    Varint(u64),
+    Bytes(&'a [u8]),
+}
+
+/// The first top-level field numbered `want` whose value `pick` accepts, or None (also for a malformed message).
+fn field<'a, T>(buf: &'a [u8], want: u64, pick: impl Fn(Value<'a>) -> Option<T>) -> Option<T> {
+    let mut pos = 0;
+    while pos < buf.len() {
+        let key = varint(buf, &mut pos)?;
+        let value = match key & 7 {
+            0 => Value::Varint(varint(buf, &mut pos)?),
             1 => {
-                i = i.checked_add(8)?;
-                false
+                pos = pos.checked_add(8)?;
+                continue;
             }
             2 => {
-                let n = usize::try_from(varint(b, &mut i)?).ok()?;
-                let end = i.checked_add(n)?;
-                let s = b.get(i..end)?;
-                i = end;
-                f(field, wire, 0, s)
+                let len = usize::try_from(varint(buf, &mut pos)?).ok()?;
+                let end = pos.checked_add(len)?;
+                let bytes = buf.get(pos..end)?;
+                pos = end;
+                Value::Bytes(bytes)
             }
             5 => {
-                i = i.checked_add(4)?;
-                false
+                pos = pos.checked_add(4)?;
+                continue;
             }
             _ => return None,
         };
-        if stop {
-            return Some(());
+        if key >> 3 == want {
+            if let Some(found) = pick(value) {
+                return Some(found);
+            }
         }
     }
-    (i == b.len()).then_some(())
+    None
 }
 
-fn field_bytes(b: &[u8], want: u64) -> Option<&[u8]> {
-    let mut out = None;
-    walk(b, |field, wire, _, s| {
-        if field == want && wire == 2 {
-            out = Some(s);
-            return true;
-        }
-        false
-    })?;
-    out
+fn field_bytes(buf: &[u8], want: u64) -> Option<&[u8]> {
+    field(buf, want, |v| match v {
+        Value::Bytes(bytes) => Some(bytes),
+        Value::Varint(_) => None,
+    })
 }
 
-fn field_varint(b: &[u8], want: u64) -> Option<u64> {
-    let mut out = None;
-    walk(b, |field, wire, v, _| {
-        if field == want && wire == 0 {
-            out = Some(v);
-            return true;
-        }
-        false
-    })?;
-    out
+fn field_varint(buf: &[u8], want: u64) -> Option<u64> {
+    field(buf, want, |v| match v {
+        Value::Varint(n) => Some(n),
+        Value::Bytes(_) => None,
+    })
 }
 
 #[cfg(test)]
@@ -156,11 +151,11 @@ mod tests {
 
     /// A ZedToken around a revision string, as SpiceDB encodes one (v1, revision, a schema hash).
     fn tok(rev: &str) -> String {
-        let mut v1 = vec![0x0a, rev.len() as u8];
+        let mut v1 = vec![0x0a, u8::try_from(rev.len()).unwrap()];
         v1.extend_from_slice(rev.as_bytes());
         v1.extend_from_slice(&[0x12, 8]);
         v1.extend_from_slice(b"e6238e7f");
-        let mut t = vec![0x1a, v1.len() as u8];
+        let mut t = vec![0x1a, u8::try_from(v1.len()).unwrap()];
         t.extend_from_slice(&v1);
         STANDARD.encode(t)
     }
