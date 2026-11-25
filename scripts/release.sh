@@ -69,4 +69,4 @@ fi
 echo "== 4. the image, the GitHub Release's assets and PGXN: publish.yml, which skips what steps 2 and 3 published"
 confirm "gh workflow run publish.yml --ref $tag -f tag=$tag -f dry-run=false"
 [ "$dry" = 1 ] || gh workflow run publish.yml --ref "$tag" -f tag="$tag" -f dry-run=false
-echo "Without GitHub Actions: make dist, then upload dist/pg_rebac-$version.zip at https://manager.pgxn.org/"
+echo "Without GitHub Actions: make dist VERSION=$version, then upload dist/pg_rebac-$version.zip at https://manager.pgxn.org/"

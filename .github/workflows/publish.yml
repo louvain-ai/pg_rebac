@@ -132,10 +132,11 @@ jobs:
           [ "$DRY_RUN" = false ] || args+=(--dry-run)
           cargo publish "${args[@]}"
 
-  # Trusted publishing with provenance: no token, no one-time password.
+  # Trusted publishing with provenance: no token, no one-time password. The one step whose failure does not stop the
+  # rest: the image, the Release and the site go out, and this job is re-run once npm is fixed.
   npm:
     needs: [plan, crates]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.npm == 'true' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.crates.result != 'failure' && needs.plan.outputs.npm == 'true' }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -164,8 +165,8 @@ jobs:
 
   # Each architecture is built on its own runner and pushed by digest, with an SBOM and provenance attached.
   image-build:
-    needs: [plan, npm]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.image == 'true' }}
+    needs: [plan, crates, npm]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.crates.result != 'failure' && needs.plan.outputs.image == 'true' }}
     strategy:
       matrix:
         include:
@@ -215,7 +216,7 @@ jobs:
   # One multi-arch tag from the two digests, signed keyless with cosign (the signature names this workflow and tag).
   image:
     needs: [plan, image-build]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.image == 'true' && inputs.dry-run == false }}
+    if: ${{ !cancelled() && needs.image-build.result == 'success' && inputs.dry-run == false }}
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -247,8 +248,8 @@ jobs:
   # The SQL, its checksums and the PGXN zip, attached to the Release that release-please created (or created here,
   # for a tag pushed by hand).
   github-release:
-    needs: [plan, image]
-    if: ${{ !cancelled() && !failure() }}
+    needs: [plan, crates, image-build, image]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -261,7 +262,7 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
           persist-credentials: false
-      - run: make dist
+      - run: make dist VERSION="$VERSION"   # PGXS, when pg_config is installed, defines its own VERSION
       - run: cd dist && sha256sum "pg_rebac--$VERSION.sql" "pg_rebac-$VERSION.zip" | tee SHA256SUMS
       - if: env.DRY_RUN == 'false'
         run: |
@@ -274,7 +275,7 @@ jobs:
   # credentials the job warns and leaves the upload to be done by hand.
   pgxn:
     needs: [plan, github-release]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.pgxn == 'true' && inputs.dry-run == false }}
+    if: ${{ !cancelled() && needs.github-release.result == 'success' && needs.plan.outputs.pgxn == 'true' && inputs.dry-run == false }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -295,7 +296,7 @@ jobs:
   # What a reader runs: the one-file quickstart, against the image and SQL just published.
   quickstart:
     needs: [plan, github-release]
-    if: ${{ !cancelled() && !failure() && inputs.dry-run == false }}
+    if: ${{ !cancelled() && needs.github-release.result == 'success' && inputs.dry-run == false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -316,7 +317,7 @@ jobs:
   # A maintenance release that is not the latest leaves the site alone. Without a token the job warns and stops.
   site:
     needs: [plan, quickstart]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.latest == 'true' && inputs.dry-run == false }}
+    if: ${{ !cancelled() && needs.quickstart.result == 'success' && needs.plan.outputs.latest == 'true' && inputs.dry-run == false }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
