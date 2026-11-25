@@ -39,6 +39,58 @@ REBAC_IT=1 cargo test -p rebacd --test integration                           # t
 - Never include credentials, real personal data or a real customer's text in code, tests or fixtures. Use invented
   names.
 
+## Commit messages
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): subject`, where the scope
+is optional (`rebacd`, `sql`, `schema`, `npm`, `quickstart`, `site`, `ci`). The type decides the next version and
+whether the commit appears in the CHANGELOG, so write a `feat` or `fix` subject as the line a reader of the release
+notes should see:
+
+| Type | Use it for | Next version (before 1.0) | In the CHANGELOG |
+|---|---|---|---|
+| `feat` | something a user can now do | minor | Features |
+| `fix` | something that was wrong for a user | patch | Fixes |
+| `perf` | the same result, faster | patch | Performance |
+| `docs`, `test`, `refactor`, `build`, `ci`, `chore` | everything else | none | no |
+
+A change that breaks an install, a configuration or what a read returns adds `!` after the type (`feat!:`) and a
+`BREAKING CHANGE:` footer saying what to do; before 1.0 it bumps the minor version. A pull request's title follows
+the same form, because a squash merge makes it the commit. CI checks both (`commitlint`, configured in
+`.commitlintrc.json`). Don't add version headings to `CHANGELOG.md` by hand; release-please writes them.
+
+## Releasing
+
+A release is one act: merging the release pull request.
+
+- **The release pull request.** On every push to `main`, release-please (`.github/workflows/release-please.yml`,
+  `release-please-config.json`) opens or updates a pull request titled `chore(main): release X.Y.Z`. It bumps every
+  version (the Cargo workspace, `rebacd`'s dependency on `rebac-schema`, `Cargo.lock`, `META.json`,
+  `packages/npm/package.json`), writes the CHANGELOG entry from the commits since the last release, and points the
+  site's one-file quickstart (`site/public/quickstart.yml`) at the new version. To change what it says, change the
+  commits, not the pull request: release-please rewrites it on every push.
+- **Merging it** tags `vX.Y.Z`, creates the GitHub Release, and starts `.github/workflows/publish.yml`. That
+  workflow checks the tag against every manifest and runs the SQL suite, then publishes in order: crates.io
+  (`rebac-schema`, then `rebacd`), npm (with provenance), the `ghcr.io/louvain-ai/rebacd` image (linux/amd64 and
+  linux/arm64, with an SBOM and provenance, signed with cosign), the Release's assets (the SQL, `SHA256SUMS`, the
+  PGXN zip), PGXN. Last, it runs the served quickstart against what it published. Every step skips what is
+  already published, so a failed run is fixed by running it again.
+- **A dry run** builds and checks everything and publishes nothing:
+  `gh workflow run publish.yml --ref vX.Y.Z -f tag=vX.Y.Z` (`dry-run` defaults to true).
+- **A patch for an older minor version** is released from a maintenance branch `release-X.Y`, cut from the last
+  `vX.Y.Z` tag, with this setup on it, `"versioning": "always-bump-patch"` in its `release-please-config.json` and
+  `.release-please-manifest.json` set to `X.Y.Z`. Fixes are cherry-picked onto it, and release-please keeps a
+  release pull request there too. Its releases move neither npm's `latest` dist-tag, the image's `latest` tag nor
+  the GitHub Release marked latest.
+- **The manual fallback**, when GitHub Actions cannot run the release: `scripts/release.sh X.Y.Z` from the release
+  commit. It asks before each step and skips what is published; run it with `--dry-run` first.
+
+To verify a release image:
+
+```sh
+cosign verify ghcr.io/louvain-ai/rebacd:X.Y.Z --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/louvain-ai/pg_rebac/\.github/workflows/publish\.yml@refs/tags/v'
+```
+
 ## Sign your commits (DCO)
 
 Every commit must be signed off under the Developer Certificate of Origin (<https://developercertificate.org/>): by
