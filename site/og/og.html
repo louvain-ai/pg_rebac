@@ -1,0 +1,55 @@
+<!doctype html>
+<!-- The Open Graph card (public/og.png, 1200x630). Regenerate with og/render.sh after changing it. Not a page:
+     it lives outside src/pages, so the build never ships it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face { font-family: "IS"; src: url("../node_modules/@fontsource-variable/instrument-sans/files/instrument-sans-latin-wdth-normal.woff2") format("woff2"); font-weight: 400 700; font-stretch: 75% 100%; }
+  @font-face { font-family: "JB"; src: url("../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); font-weight: 100 800; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1200px; height: 630px; }
+  body {
+    background: #f4f6f8; color: #182030; font-family: "IS", sans-serif; font-feature-settings: "ss01";
+    -webkit-font-smoothing: antialiased; padding: 64px 72px; display: grid;
+    grid-template-columns: 1fr 400px; grid-template-rows: auto 1fr auto; column-gap: 56px; position: relative;
+  }
+  body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 8px; background: #4a3fd0; }
+  .brand { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; font-weight: 650; font-size: 30px; letter-spacing: -0.01em; }
+  h1 { align-self: center; margin: 0; font-size: 76px; line-height: 1.0; letter-spacing: -0.04em; font-weight: 640; font-stretch: 92%; }
+  .cmd { grid-column: 1 / -1; font-family: "JB", monospace; font-size: 21px; color: #4d5768; display: flex; justify-content: space-between; align-items: baseline; }
+  .cmd span { font-family: "IS", sans-serif; font-size: 24px; }
+  .cmd b { color: #182030; font-weight: 600; }
+  .readers { align-self: center; border: 1px solid #d5dae1; border-radius: 8px; background: #fff; overflow: hidden; }
+  .r { padding: 18px 22px 12px; }
+  .r + .r { border-top: 1px solid #d5dae1; }
+  .who { display: flex; justify-content: space-between; align-items: baseline; font-weight: 650; font-size: 22px; margin-bottom: 8px; }
+  .who span { font-weight: 450; font-size: 15px; color: #4d5768; }
+  .row { display: flex; justify-content: space-between; font-size: 17px; padding: 5px 0; border-top: 1px solid #e3e7ec; }
+  .row i { font-style: normal; font-family: "JB", monospace; font-size: 14px; color: #4d5768; }
+  .row i.x { color: #4a3fd0; }
+</style>
+</head>
+<body>
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="40" height="40" fill="none"><rect x="3" y="3" width="26" height="26" rx="4" stroke="#182030" stroke-width="2.5"/><path d="M10 10v12M16 10v12M22 10v12" stroke="#182030" stroke-width="2.5" stroke-linecap="round"/><path d="M7 16h18" stroke="#4a3fd0" stroke-width="2.5" stroke-linecap="round"/></svg>
+    pg_rebac
+  </div>
+  <h1>Search everything. Return only what's authorized.</h1>
+  <div class="readers">
+    <div class="r">
+      <div class="who">alice <span>reads handbook and payroll</span></div>
+      <div class="row">Annual pay review <i>handbook</i></div>
+      <div class="row">Salary bands 2026 <i class="x">payroll</i></div>
+      <div class="row">Pay days <i>handbook</i></div>
+    </div>
+    <div class="r">
+      <div class="who">bob <span>reads handbook and deals</span></div>
+      <div class="row">Annual pay review <i>handbook</i></div>
+      <div class="row">Pay days <i>handbook</i></div>
+      <div class="row">Commission plan <i class="x">deals</i></div>
+    </div>
+  </div>
+  <div class="cmd"><span>SpiceDB relationships, fenced inside the Postgres query plan</span><b>pgrebac.com</b></div>
+</body>
+</html>

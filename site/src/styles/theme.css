@@ -1,19 +1,27 @@
-/* pg_rebac: cool paper and ink, one indigo accent. Dark is Starlight's default; light overrides. */
+/* pg_rebac docs: the cover's paper, ink and indigo (cover.css), mapped onto Starlight's scale. Dark is Starlight's
+   default; light overrides. */
 :root {
   --louvain-mark: #a1aaff;
   --sl-font: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
   --sl-font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sl-color-accent-low: #241f4a;
-  --sl-color-accent: #8a7ff5;
-  --sl-color-accent-high: #cdc8ff;
+  --sl-color-accent-low: #2d2760;
+  --sl-color-accent: #a69cff;
+  --sl-color-accent-high: #ddd9ff;
   --sl-color-white: #f3f5f8;
   --sl-color-gray-1: #e3e7ee;
   --sl-color-gray-2: #c2c9d4;
-  --sl-color-gray-3: #98a2b3;
-  --sl-color-gray-4: #5f6878;
+  --sl-color-gray-3: #a3acbb;
+  --sl-color-gray-4: #8a93a3;
   --sl-color-gray-5: #2a313c;
-  --sl-color-gray-6: #181d25;
+  --sl-color-gray-6: #161b23;
   --sl-color-black: #10141b;
+  --sl-color-hairline-light: #2a313c;
+  --sl-color-hairline: #222832;
+  --sl-color-bg-nav: #10141b;
+  --sl-color-bg-sidebar: #10141b;
+  --sl-color-text-accent: #a69cff;
+  --sl-color-text-invert: #10141b;
+  --pg-radius: 6px;
 }
 :root[data-theme="light"] {
   --louvain-mark: #535bd5;
@@ -24,15 +32,66 @@
   --sl-color-gray-1: #182030;
   --sl-color-gray-2: #2f3848;
   --sl-color-gray-3: #4d5768;
-  --sl-color-gray-4: #7a8494;
+  --sl-color-gray-4: #5f6878;
   --sl-color-gray-5: #d5dae1;
-  --sl-color-gray-6: #e9ecf0;
-  --sl-color-gray-7: #f1f3f6;
-  --sl-color-black: #f8f9fb;
+  --sl-color-gray-6: #eceff3;
+  --sl-color-gray-7: #f4f6f8;
+  --sl-color-black: #f4f6f8;
+  --sl-color-hairline-light: #e3e7ec;
+  --sl-color-hairline: #d5dae1;
+  --sl-color-bg-nav: #f4f6f8;
+  --sl-color-bg-sidebar: #f4f6f8;
+  --sl-color-text-accent: #4a3fd0;
+  --sl-color-text-invert: #ffffff;
 }
-/* No capsules anywhere: the one round control Starlight ships gets the house radius. */
-starlight-menu-button button { border-radius: 6px !important; }
-.sl-markdown-content table { display: block; overflow-x: auto; }
-.sl-markdown-content code:not(pre code) { border-radius: 4px; }
 
+body { font-feature-settings: "ss01"; -webkit-font-smoothing: antialiased; }
 code, pre, kbd { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
+.sl-markdown-content a { text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
+.sl-markdown-content a:hover { text-decoration-thickness: 2px; }
+.sl-markdown-content h2 { letter-spacing: -0.02em; }
+.sl-markdown-content h1, .sl-markdown-content h2, .sl-markdown-content h3 { text-wrap: balance; }
+.content-panel h1 { letter-spacing: -0.03em; font-weight: 640; }
+
+/* No capsules anywhere: Starlight's round and 0.5rem controls take the house radius. */
+.sl-menu-button {
+  border-radius: var(--pg-radius) !important; box-shadow: none !important;
+  background: transparent !important; color: var(--sl-color-gray-2) !important; border: 1px solid var(--sl-color-gray-5) !important;
+}
+.sl-menu-button:has(~ :popover-open) { background: var(--sl-color-gray-6) !important; }
+.pagination-links a, site-search button[data-open-modal], site-search dialog, mobile-starlight-toc summary {
+  border-radius: var(--pg-radius) !important;
+}
+.site-title img { height: 1.5rem !important; width: auto; }
+/* The current page: a quiet tint, not a filled bar. */
+.sidebar-content a[aria-current="page"] {
+  background: var(--sl-color-accent-low) !important; color: var(--sl-color-accent-high) !important; font-weight: 600;
+}
+.sidebar-content a { border-radius: 4px; }
+/* The site title in ink, as on the cover; the mark carries the accent. */
+.site-title { color: var(--sl-color-white) !important; font-weight: 650 !important; letter-spacing: -0.01em; }
+.sl-markdown-content code:not(pre code) {
+  border-radius: 4px; padding: 0.1em 0.35em; border: 1px solid var(--sl-color-hairline);
+  background: var(--sl-color-gray-6);
+}
+
+/* Tables: rules, not stripes, and numbers that line up. */
+.sl-markdown-content table { display: block; overflow-x: auto; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.sl-markdown-content :is(th, td) { border: none; border-bottom: 1px solid var(--sl-color-hairline); padding: 0.6rem 0.9rem 0.6rem 0; vertical-align: top; }
+.sl-markdown-content th { border-bottom-color: var(--sl-color-gray-4); font-weight: 620; }
+.sl-markdown-content tr:nth-child(2n) { background: none; }
+
+/* A wide table (four or more columns, marked by rehype-stack-tables) becomes one labelled block per row on a phone:
+   the row's first cell is its heading, each other cell carries its column's name. */
+@media (max-width: 50rem) {
+  .sl-markdown-content table.stack, .sl-markdown-content table.stack :is(tbody, tr, td) { display: block; }
+  .sl-markdown-content table.stack { overflow: visible; }
+  .sl-markdown-content table.stack thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .sl-markdown-content table.stack tr { padding: 0.9rem 0; border-bottom: 1px solid var(--sl-color-hairline); }
+  .sl-markdown-content table.stack tr:first-child { border-top: 1px solid var(--sl-color-gray-4); }
+  .sl-markdown-content table.stack td { border: none; padding: 0; margin-top: 0.6rem; line-height: 1.5; }
+  .sl-markdown-content table.stack td:first-child { font-weight: 620; font-size: 1.05em; margin-top: 0; color: var(--sl-color-white); }
+  .sl-markdown-content table.stack td:not(:first-child)::before {
+    content: attr(data-label); display: block; font-size: 0.8125rem; color: var(--sl-color-gray-3); margin-bottom: 0.1rem;
+  }
+}

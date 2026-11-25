@@ -1,0 +1,7 @@
+---
+// Starlight's MarkdownContent, with wide tables labelled for phones (stack-tables.ts).
+import Default from "@astrojs/starlight/components/MarkdownContent.astro";
+import { stackTables } from "./stack-tables";
+const html = stackTables(await Astro.slots.render("default"));
+---
+<Default><Fragment set:html={html} /></Default>
