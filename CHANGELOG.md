@@ -46,7 +46,6 @@
   Watch, and after the queues drain. `tests/sql/18_grant_nodes.sql` and `19_node_races.sql` (dblink, both orders)
   cover nodes; `tests/upgrade/run.sh` installs 0.2.0, projects, applies this SQL twice and checks reads and
   revocations.
-
 - **A dropped Watch stream fails closed per principal, not everyone.** In 0.2.0 the heartbeat required the stream, so
   one Watch hiccup made every read in every tenant `RB503` within 5 s. Now the heartbeat is liveness only, and
   `rebac.checked` calls `rebac.watch_ok` (new): a set is read while its own lookup, or the last time the caught-up
@@ -61,7 +60,6 @@
 - **`POST /lookup` and `GET /status` can require a bearer token** (`lookup_token_env`, the NAME of the variable that
   holds it). A lookup's reply names how many containers a principal reads, and any caller could make the daemon ask
   SpiceDB; with a token set, anything else is a 401. A non-loopback `listen` without a token logs a warning.
-
 - **Every schema refusal states its reason** (the closure's messages said "not supported").
 - **Several daemons on one database, safely: leader election.** Only the daemon holding a session advisory lock
   (`1919050596, 1`; shadow `1919050596, 2`) runs Watch, the closure check and the sweep; every daemon relays,
@@ -72,19 +70,20 @@
   restarts from the head revision read directly, and a resumed stream whose stored position is the head is current
   at once. Watch now follows every type (relations outside the closure are skipped), so a head past the position
   always means changes the stream delivers.
-
 - **`rebac.rls_bypasses(tbl)`: who reads a fenced table without the fence** (superusers, `BYPASSRLS` roles, an owner
   without FORCE, views without `security_invoker`, materialized views). `rebac.enable_rls` warns about each.
 - **Docs.** The FAQ answers outages, freshness and zedtokens, RLS bypasses, open transactions after a revocation,
   upgrades and maintenance; NOTICE names the vendored protos' copyright holders.
-
 - **CI: through PgBouncer in transaction mode** (`tests/pooler/run.sh`): a session `SET` leaks to the next client and
   `SET LOCAL` does not; a fenced read, a revocation at commit and `set_principal` work through it. **And as on hosted
   Postgres**: the install beside the usual extensions, re-run over itself, and the daemon's calls as a role with
   privileges on schema `rebac` only. Getting started documents both.
-
 - **`GET /metrics`**: `rebac.status()` as Prometheus gauges, plus `rebacd_leader` and `rebacd_watch_current`. No id is
   ever a label; behind the lookup token when one is set.
+- **A schema with non-ASCII text outside a comment or string is a parse error (fix).** `rebac_schema::parse`
+  panicked on it (a byte index inside a character). SpiceDB refuses such a schema, so `rebacd` reading a live one
+  never met it.
+- **A relay outage is logged as `grpc:<code>` (fix)**, not `other`: the SpiceDB status stayed out of the error.
 
 ## 0.2.0
 
