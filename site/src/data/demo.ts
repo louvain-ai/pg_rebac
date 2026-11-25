@@ -1,8 +1,8 @@
 // The quickstart's first result, as it prints it (public/quickstart.yml): one vector search, top 5 nearest to
 // "salary pay review", run as two people. The cover's two-readers figure draws these rows.
-export const quickstart = "curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo";
-/** The same command broken after the pipe, where a shell continues the line, so it reads in a narrow column. */
-export const quickstartLines = "curl -fsSL https://pgrebac.com/quickstart.yml |\n  docker compose -f - run --rm demo";
+export const quickstart = "docker compose -f <(curl -fsSL https://pgrebac.com/quickstart.yml) run --rm demo";
+/** The same command broken with a backslash, where a shell continues the line, so it reads in a narrow column. */
+export const quickstartLines = "docker compose -f <(curl -fsSL https://pgrebac.com/quickstart.yml) \\\n  run --rm demo";
 
 export interface Reader {
   name: string;
