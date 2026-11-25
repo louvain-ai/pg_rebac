@@ -1,4 +1,7 @@
 -- Grants to a subject set (container#member@group:eng#member) and memberships of it (group:eng#member@user:ana).
+-- With grant nodes OFF (node_grants = off, the 0.2 behaviour and the kill switch): every grant is expanded per
+-- principal. 18_grant_nodes.sql tests the same removals with nodes on.
+update rebac.config set value = 'off' where key = 'node_grants';
 select t.fixture_relations_with_sets();
 select t.beat();
 set rebac.tenant = 'acme';

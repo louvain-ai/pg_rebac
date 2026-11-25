@@ -1,4 +1,7 @@
 -- Wildcards on the projected type (container#member@user:*): a grant to everyone, refreshed for everyone, and its
+-- With grant nodes OFF (node_grants = off, the 0.2 behaviour and the kill switch): every grant is expanded per
+-- principal. 18_grant_nodes.sql tests the same removals with nodes on.
+update rebac.config set value = 'off' where key = 'node_grants';
 -- removal narrows every holder of the container (as an arrow's or a set grant's does).
 select t.fixture_relations_with_sets();
 select t.beat();

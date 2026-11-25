@@ -31,7 +31,7 @@ begin
 end $$;
 
 create or replace function t.set_of(p text) returns text[]
-language sql as $$ select coalesce(array_agg(c order by c), '{}') from rebac.readable_set(p) c $$;
+language sql as $$ select coalesce(array_agg(distinct c order by c), '{}') from rebac.readable_set(p) c $$;
 
 -- The schema shape pg_rebac supports, as the daemon would derive it from:
 --   definition workspace { relation admin: user }

@@ -51,3 +51,17 @@ select t.ok(t.ok_at('20 seconds'), 'watch = false: the sweep bound (G7) applies 
 update rebac.watch_state set gap_at = now() - interval '1 second' where scope = 'watch_applied';
 select t.ok(not t.ok_at('5 seconds'), 'looked up before the gap');
 select t.ok(t.ok_at('0 seconds'), 'looked up after the gap');
+
+-- Through the read path (rebac.checked calls watch_ok with the oldest lookup behind the set).
+select t.beat();
+set rebac.tenant = 'acme';
+select rebac.watch_required(true);
+update rebac.watch_state set current_at = now() - interval '1 hour' where scope = 'watch_applied';
+select rebac.project('acme', 'old', array['c1'], 't', 'live', now() - interval '1 minute');
+select t.raises($$select * from rebac.readable_set('old')$$, 'RB503', 'a stale-Watch principal fails closed through readable_set');
+select rebac.project('acme', 'new', array['c1'], 't', 'live', now());
+select t.eq(t.set_of('new'), array['c1'], 'a principal looked up since still reads');
+-- A grant node looked up before the drop fails its members closed, though their own lookup is recent.
+select rebac.project('acme', '#group:eng#member', array['c2'], 't', 'live', now() - interval '1 minute');
+select rebac.project('acme', 'mem', '{}', 't', 'live', now(), array['#group:eng#member']);
+select t.raises($$select * from rebac.readable_set('mem')$$, 'RB503', 'the oldest lookup behind the set decides, a node''s included');

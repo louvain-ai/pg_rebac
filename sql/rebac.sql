@@ -39,7 +39,11 @@ insert into rebac.config (key, value) values
   ('empty_ttl_ms', '60000'),          -- how long "can read nothing" is believed
   ('max_containers_per_principal', '100000'),
   ('narrow_lock_timeout_ms', '5000'),  -- how long narrowing waits for a principal's lock before failing the commit
-  ('exact_below_rows', '5000')       -- rebac.fenced_ids sorts exactly below this many candidate rows, else fenced ANN
+  ('exact_below_rows', '5000'),      -- rebac.fenced_ids sorts exactly below this many candidate rows, else fenced ANN
+  ('node_grants', 'on'),             -- a grant to a subject set or a wildcard is stored once, under its GRANT NODE, and
+                                     -- expanded at read time ('off': every grant is expanded per principal, as in 0.2)
+  ('max_containers_per_node', '1000000'), -- a grant node over this is unavailable, and its members read RB503
+  ('wildcard_probe', '__rebac_anyone__')  -- the id a wildcard node is looked up as (SpiceDB cannot look up `user:*`)
 on conflict (key) do nothing;
 
 create or replace function rebac.setting(k text) returns text
@@ -51,7 +55,10 @@ $$;
 -- Tables.
 -- -------------------------------------------------------------------------------------------------------------------
 
--- The projection: one row per (tenant, principal, container) the principal may view.
+-- The projection: one row per (tenant, holder, container) the holder may view. A holder is a principal, or a GRANT
+-- NODE: a subject set (`#group:eng#member`) or a wildcard (`#user:*`) that a grant names, stored once under the node
+-- and read by every member through rebac.holders_of. A node's name starts with '#', which no principal may. The
+-- column keeps its 0.2 name, `principal`.
 create table if not exists rebac.readable (
   tenant    text not null,
   principal text not null,
@@ -87,6 +94,18 @@ create table if not exists rebac.principal_state (
 -- When the SpiceDB lookup behind this principal's set BEGAN: the time up to which every change SpiceDB held is
 -- reflected in it (narrowing since only removes). NULL is unknown, and reads fail closed on it (max_projection_age_ms).
 alter table rebac.principal_state add column if not exists looked_up_at timestamptz;
+
+-- WHICH GRANT NODES A PRINCIPAL STANDS FOR: its memberships of subject sets, as SpiceDB answered them in the
+-- principal's own lookup (so they are exactly as fresh as its set), written only by rebac.project under the
+-- principal's lock, and removed at commit by a membership's revocation. A wildcard node needs no row: every principal
+-- with a subject of its type stands for it.
+create table if not exists rebac.node_member (
+  tenant    text not null,
+  principal text not null,
+  node      text not null,   -- '#group:eng#member'
+  primary key (tenant, principal, node)
+);
+create index if not exists node_member_node_idx on rebac.node_member (tenant, node);
 
 -- Principal -> SpiceDB subjects. A principal reads as the union of its subjects (and its implicit one). The
 -- application writes this table; only `trusted` rows count.
@@ -170,6 +189,13 @@ create table if not exists rebac.outbox (
 alter table rebac.outbox add column if not exists origin text not null default 'write';
 alter table rebac.outbox drop constraint if exists outbox_origin_check;
 alter table rebac.outbox add constraint outbox_origin_check check (origin in ('write', 'watch'));
+-- Who a revocation narrowed that it does not name (the holders of a container an arrow, a set grant or a wildcard took
+-- away, and what was under it): each is re-projected once the relay has delivered it, so one who also reads a
+-- container another way gets it back at the delete's token, not only at the next sweep.
+alter table rebac.outbox add column if not exists narrowed text[];
+-- The containers a revocation took from a grant node. A member whose own rows were subtracted against the node may
+-- also read one of them another way; its delivery asks SpiceDB who still views each (LookupSubjects).
+alter table rebac.outbox add column if not exists narrowed_containers text[];
 create index if not exists outbox_unsynced_idx on rebac.outbox (tenant, seq) where synced_at is null;
 create index if not exists outbox_relationship_idx on rebac.outbox (resource, relation, subject, seq desc);
 create index if not exists outbox_xid_idx on rebac.outbox (committed_xid);
@@ -264,20 +290,36 @@ language sql stable parallel safe as $$
          || '#' || split_part(ref, '#', 2)
 $$;
 
--- The SpiceDB subjects a principal reads as. A retired principal reads as nothing.
+-- GRANT NODES. A holder whose name starts with '#' is a node: '#group:eng#member' (a subject set, tenant prefix
+-- stripped) or '#user:*' (a wildcard). Nodes are projected like principals (their own lookup, row in
+-- rebac.principal_state, the same lock), but nobody reads as one: rebac.checked refuses a node name (RB400).
+create or replace function rebac.is_node(p text) returns boolean
+language sql immutable parallel safe as $$ select starts_with(p, '#') $$;
+
+create or replace function rebac.nodes_on() returns boolean
+language sql stable parallel safe as $$ select coalesce(rebac.setting('node_grants'), 'off') = 'on' $$;
+
+-- The SpiceDB subjects a principal reads as. A retired principal reads as nothing. A node reads as its own subject
+-- ('group:acme/eng#member', or 'user:*', which the daemon looks up as its wildcard probe).
 create or replace function rebac.subjects_of(t text, p text) returns setof text
 language sql stable as $$
   select s from (
-    select subject as s from rebac.subject where tenant = t and principal = p and trusted
+    select subject as s from rebac.subject where tenant = t and principal = p and trusted and not rebac.is_node(p)
     union
     select rebac.setting('subject_type') || ':' || rebac.prefix(t) || p
-    where rebac.setting('implicit_subject') = 'true'
+    where rebac.setting('implicit_subject') = 'true' and not rebac.is_node(p)
+    union
+    select case when rebac.obj_id(substr(p, 2)) = '*' then substr(p, 2)
+                else rebac.obj_type(substr(p, 2)) || ':' || rebac.prefix(t) || split_part(rebac.obj_id(substr(p, 2)), '#', 1)
+                     || '#' || split_part(substr(p, 2), '#', 2) end
+    where rebac.is_node(p)
   ) x
   where not exists (select 1 from rebac.principal_state ps
                     where ps.tenant = t and ps.principal = p and ps.state = 'retired')
 $$;
 
--- The principals a subject reference stands for in a tenant: its explicit links, and its implicit principal.
+-- The principals a subject reference stands for in a tenant: its explicit links, and its implicit principal. With
+-- node grants on, a subject set (`group:acme/eng#member`) and a wildcard (`user:*`) stand for their NODE.
 -- A subject whose prefix is not this tenant's stands for nobody here.
 create or replace function rebac.principals_of(t text, subj text) returns setof text
 language sql stable as $$
@@ -288,10 +330,35 @@ language sql stable as $$
     and rebac.obj_type(subj) = rebac.setting('subject_type')
     and rebac.strip(t, rebac.obj_id(subj)) is not null
     and strpos(subj, '#') = 0
-    and rebac.obj_id(subj) <> '*'   -- a wildcard names nobody: its removal narrows every holder instead
+    and rebac.obj_id(subj) <> '*'   -- a wildcard names no principal: its removal narrows every holder instead
+  union
+  select '#' || rebac.set_ref(t, subj)
+  where rebac.nodes_on() and strpos(subj, '#') > 0 and rebac.strip(t, split_part(rebac.obj_id(subj), '#', 1)) is not null
+  union
+  select '#' || subj
+  where rebac.nodes_on() and rebac.obj_id(subj) = '*'
 $$;
 
--- THE LOCK ORDER, for every writer of the projection: the TENANT first, then the PRINCIPAL.
+-- THE HOLDERS A PRINCIPAL READS THROUGH: itself, the subject-set nodes it is a member of, and the wildcard node of
+-- each subject type it reads as. Only nodes that have been projected count (a node never projected holds nothing:
+-- what it grants is still in the principal's own rows). A principal's nodes are a short array, computed once per query.
+create or replace function rebac.holders_of(t text, p text) returns text[]
+language sql stable parallel safe as $$
+  select array[p] || case when not rebac.nodes_on() then '{}'::text[] else array(
+    select ps.principal from rebac.principal_state ps
+    where ps.tenant = t and ps.state in ('projected', 'unavailable')
+      and ps.principal in (
+        select m.node from rebac.node_member m where m.tenant = t and m.principal = p
+        union all
+        select '#' || rebac.setting('subject_type') || ':*' where rebac.setting('implicit_subject') = 'true'
+        union all
+        select '#' || rebac.obj_type(su.subject) || ':*' from rebac.subject su
+        where su.tenant = t and su.principal = p and su.trusted and strpos(su.subject, '#') = 0)
+    order by ps.principal) end
+$$;
+
+-- THE LOCK ORDER, for every writer of the projection: the TENANT first, then the PRINCIPAL. A grant node is a
+-- principal here: its refresh and its narrowing take its own lock, in the same sorted order as everyone else's.
 --   * A refresh, a lazy first read, a retirement and a narrowing that names its principals take the tenant SHARED, then
 --     the principal's own lock exclusively (rebac.lock_principal), before asking SpiceDB, until they commit.
 --   * A narrowing that removes an arrow tuple or a grant to a subject set names nobody: it narrows every holder of the
@@ -331,12 +398,19 @@ declare
   bound bigint := coalesce(rebac.setting('max_staleness_ms'), '0')::bigint;
   age bigint := coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint;
   beat timestamptz;
-  gap timestamptz;
   cl rebac.closure_state;
   st rebac.principal_state;
+  nodes text[];             -- the grant nodes this principal reads through
+  eff timestamptz;          -- the oldest lookup behind this set: the principal's own, or any of its nodes'
+  n_nodes integer := 0;
+  node_unknown boolean := false;
+  node_bad text;
 begin
   if p is null or p = '' then
     raise exception 'rebac: no principal' using errcode = 'RB400';
+  end if;
+  if rebac.is_node(p) then
+    raise exception 'rebac: % is a grant node, not a principal: nobody reads as one', p using errcode = 'RB400';
   end if;
   -- LIVENESS: the daemon is up and can reach SpiceDB and Postgres. It says nothing about how current a set is.
   if bound > 0 then
@@ -361,20 +435,36 @@ begin
         using errcode = 'RB503';
     end if;
     if st.state = 'projected' then
+      -- THE NODES this principal reads through. Each was looked up on its own, so the set is as old as the oldest of
+      -- them and the principal's own lookup; a node that is unavailable (over its cap, or not looked up) fails closed.
+      nodes := array_remove(rebac.holders_of(t, p), p);
+      if cardinality(nodes) > 0 then
+        select count(*), bool_or(ps.looked_up_at is null), min(ps.looked_up_at),
+               min(ps.principal || ' (' || coalesce(ps.reason, 'unknown') || ')') filter (where ps.state <> 'projected')
+          into n_nodes, node_unknown, eff, node_bad
+        from rebac.principal_state ps
+        where ps.tenant = t and ps.principal = any(nodes);
+        if node_bad is not null then
+          raise exception 'rebac: a grant node this principal reads through is unavailable: %', node_bad
+            using errcode = 'RB503', hint = 'rebac_node: the node is re-projected by the daemon, or its cap raised';
+        end if;
+      end if;
+      eff := case when st.looked_up_at is null or coalesce(node_unknown, false) then null
+                  when n_nodes > 0 then least(st.looked_up_at, eff) else st.looked_up_at end;
       -- FRESHNESS: the set reflects SpiceDB as of its lookup; one older than the bound, or of unknown age, is not read.
-      if age > 0 and (st.looked_up_at is null
-                      or statement_timestamp() - st.looked_up_at > age * interval '1 millisecond') then
-        raise exception 'rebac: the projection of this principal is older than % ms, or of unknown age', age
+      if age > 0 and (eff is null or statement_timestamp() - eff > age * interval '1 millisecond') then
+        raise exception 'rebac: the projection of this principal (or of a grant node it reads through) is older than % ms, or of unknown age', age
           using errcode = 'RB503',
                 hint = 'rebac_not_fresh: the daemon''s sweep re-projects everyone; POST /lookup re-projects one now';
       end if;
-      -- WATCH: the gap (Watch restarted from head) and, with Watch required, the grace (rebac.watch_ok).
-      perform rebac.watch_ok(t, st.looked_up_at);
-      if cl.changed_at > '-infinity' and (st.looked_up_at is null or st.looked_up_at < cl.changed_at) then
-        raise exception 'rebac: this principal was projected before the schema''s closure last changed'
+      -- WATCH: the gap (Watch restarted from head) and, with Watch required, the grace (rebac.watch_ok), against the
+      -- oldest lookup behind the set.
+      perform rebac.watch_ok(t, eff);
+      if cl.changed_at > '-infinity' and (eff is null or eff < cl.changed_at) then
+        raise exception 'rebac: this principal (or a grant node it reads through) was projected before the schema''s closure last changed'
           using errcode = 'RB503', hint = 'rebac_closure: it is re-projected by the rebuild, the sweep or POST /lookup';
       end if;
-      if st.n_containers > 0 then return true; end if;
+      if st.n_containers > 0 or n_nodes > 0 then return true; end if;
       if exists (select 1 from rebac.readable_empty e where e.tenant = t and e.principal = p
                    and e.checked_at > statement_timestamp()
                        - coalesce(rebac.setting('empty_ttl_ms'), '0')::bigint * interval '1 millisecond') then
@@ -393,17 +483,23 @@ end $$;
 -- with a sub-select is never inlined, which is why the planner-shaped form is a set and not a boolean.
 -- GUARANTEE: no row is ever returned without rebac.checked having passed. An answer that is empty for another reason
 -- (nothing to fence) may return empty without evaluating it.
+-- With grant nodes the set is rebac.readable's rows for the principal's HOLDERS (itself and its nodes, a short array
+-- computed once in an InitPlan): still one table and one index, so a plan with the HNSW scan outside probes one index
+-- per candidate row (`principal = ANY(holders) AND container = c`), as in 0.2. A container held both directly and
+-- through a node, or through two nodes, appears more than once; `in` and `= any` are unaffected.
 create or replace function rebac.readable_set(p text) returns setof text
 language sql stable parallel safe rows 1000 as $$
   select r.container from rebac.readable r
-  where (select rebac.checked(p)) and r.tenant = (select rebac.tenant()) and r.principal = p
+  where (select rebac.checked(p)) and r.tenant = (select rebac.tenant())
+    and r.principal = any((select rebac.holders_of((select rebac.tenant()), p))::text[])
 $$;
 
 -- The set, narrowed by a list the caller resolved: an intersection, so the list can only narrow, never widen.
 create or replace function rebac.readable_set(p text, within text[]) returns setof text
 language sql stable parallel safe rows 1000 as $$
   select r.container from rebac.readable r
-  where (select rebac.checked(p)) and r.tenant = (select rebac.tenant()) and r.principal = p
+  where (select rebac.checked(p)) and r.tenant = (select rebac.tenant())
+    and r.principal = any((select rebac.holders_of((select rebac.tenant()), p))::text[])
     and r.container = any(within)
 $$;
 
@@ -413,21 +509,50 @@ create or replace function rebac.readable_by(p text, c text) returns boolean
 language plpgsql stable parallel safe as $$
 begin
   if not rebac.checked(p) then return false; end if;
-  return exists (select 1 from rebac.readable r where r.tenant = rebac.tenant() and r.principal = p and r.container = c);
+  return exists (select 1 from rebac.readable r where r.tenant = rebac.tenant()
+                   and r.principal = any((select rebac.holders_of(rebac.tenant(), p))::text[]) and r.container = c);
 end $$;
 
 -- How many containers a principal reads (checked like a read), for choosing the exact path or the ANN path: below
--- a few thousand candidate rows the exact path is both faster and complete (docs/planner.md).
+-- a few thousand candidate rows the exact path is both faster and complete (docs/planner.md). The sum over its
+-- holders, read from rebac.principal_state: a container held through two of them counts twice.
 create or replace function rebac.breadth(p text) returns integer
 language sql stable as $$
   select case when rebac.checked(p) then
-    (select n_containers from rebac.principal_state where tenant = rebac.tenant() and principal = p) else 0 end
+    (select coalesce(sum(n_containers), 0)::integer from rebac.principal_state
+     where tenant = rebac.tenant() and principal = any((select rebac.holders_of(rebac.tenant(), p))::text[])) else 0 end
 $$;
 
--- The set's version, for caches keyed on it.
+-- The set's version, for caches keyed on it: a value that changes whenever the principal's rows, its memberships or
+-- any of its nodes' rows change. With no node it is the principal's own counter, as in 0.2; with nodes it is a hash of
+-- every holder's counter, because a sum stands still when a membership removed takes a node's count away.
 create or replace function rebac.version(p text) returns bigint
 language sql stable as $$
-  select coalesce((select version from rebac.principal_state where tenant = rebac.tenant() and principal = p), 0)
+  select case when count(*) filter (where principal <> p) = 0 then coalesce(max(version), 0)
+              else hashtextextended(string_agg(principal || '=' || version, ',' order by principal collate "C"), 0) end
+  from rebac.principal_state
+  where tenant = rebac.tenant() and principal = any((select rebac.holders_of(rebac.tenant(), p))::text[])
+$$;
+
+-- The grant nodes a principal reads through that a read would refuse soon or now (unknown age, older than half the
+-- freshness bound, from before the Watch gap or the closure's last change, or unavailable): `POST /lookup`
+-- re-projects them with the principal.
+create or replace function rebac.stale_nodes(t text, p text) returns setof text
+language sql stable as $$
+  select ps.principal from rebac.principal_state ps
+  where ps.tenant = t and ps.principal = any((select rebac.holders_of(t, p))::text[]) and ps.principal <> p
+    and (ps.state <> 'projected' or ps.looked_up_at is null
+         or (coalesce(rebac.setting('max_projection_age_ms'), '0')::bigint > 0 and statement_timestamp() - ps.looked_up_at
+             > rebac.setting('max_projection_age_ms')::bigint / 2 * interval '1 millisecond')
+         or ps.looked_up_at < (select w.gap_at from rebac.watch_state w where w.scope = 'watch_applied')
+         or ps.looked_up_at < (select c.changed_at from rebac.closure_state c))
+$$;
+
+-- Every container a principal's holders hold, unchecked: for operators (`rebacd verify`, tests), never for a fence.
+create or replace function rebac.expanded(t text, p text) returns setof text
+language sql stable as $$
+  select distinct r.container from rebac.readable r
+  where r.tenant = t and r.principal = any((select rebac.holders_of(t, p))::text[])
 $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
@@ -469,7 +594,14 @@ begin
     tenant_filter := format('%I = rebac.tenant() and ', tenant_col);
   end if;
   -- The set, checked (it raises rather than return empty by accident).
-  arr := array(select * from rebac.readable_set(p));
+  -- A set read through several holders comes in one run per holder, and an unsorted array of thousands makes the
+  -- index scan below sort it (measured 3x slower at 21,000): sort it here, in "C", the cheap order. One holder's
+  -- rows come in index order already.
+  if cardinality(rebac.holders_of(rebac.tenant(), p)) > 1 then
+    arr := array(select c from rebac.readable_set(p) c order by c collate "C");
+  else
+    arr := array(select * from rebac.readable_set(p));
+  end if;
   if cardinality(arr) = 0 then return; end if;
   execute format('select count(*) from (select 1 from %s where %s%I = any($1) limit $2) x',
                  tbl, tenant_filter, container_col)
@@ -496,18 +628,46 @@ begin
            from pg_extension e join pg_namespace n on n.oid = e.extnamespace where e.extname = 'vector');
   prior := current_setting('hnsw.iterative_scan');
   perform set_config('hnsw.iterative_scan', 'relaxed_order', true);
-  -- relaxed_order returns the k rows slightly out of order: they are put back in order here.
+  -- relaxed_order returns the k rows slightly out of order: they are put back in order here. The fence is a probe per
+  -- candidate row (a sub-select the planner cannot turn into a join), so the HNSW scan is always the outer loop: the
+  -- `in` form lets the planner choose, and with grant nodes it cannot see a broad reader's breadth (docs/planner.md).
+  -- The set was checked above (rebac.readable_set raised or returned rows); the holders are computed once.
   return query execute format(
-    'select s.i, s.d, ''ann''::text from (select %I::text as i, (%I %s $1)::float8 as d from %s
-       where %s%I in (select * from rebac.readable_set($2)) order by %I %s $1 limit $3) s order by s.d',
-    id_col, embedding_col, op, tbl, tenant_filter, container_col, embedding_col, op)
-    using q, p, k;
+    'select s.i, s.d, ''ann''::text from (select x.%I::text as i, (x.%I %s $1)::float8 as d from %s x
+       where %s(select true from rebac.readable r where r.tenant = $4 and r.principal = any($2)
+                  and r.container = x.%I limit 1)
+       order by x.%I %s $1 limit $3) s order by s.d',
+    id_col, embedding_col, op, tbl,
+    case when tenant_col is null then '' else format('x.%I = rebac.tenant() and ', tenant_col) end,
+    container_col, embedding_col, op)
+    using q, rebac.holders_of(rebac.tenant(), p), k, rebac.tenant();
   perform set_config('hnsw.iterative_scan', prior, true);
 end $$;
 
 -- -------------------------------------------------------------------------------------------------------------------
 -- Projection writers (the daemon's entry points). Each takes the tenant explicitly; none clears another tenant.
 -- -------------------------------------------------------------------------------------------------------------------
+
+-- The containers a via relation's tuple reaches: those whose arrow (the via's `through`) points at its object.
+create or replace function rebac.via_children(t text, resource text, relation text) returns setof text
+language sql stable as $$
+  select e.child from rebac.view_relation v
+  join rebac.edge e on e.tenant = t and e.relation = v.through
+   and e.parent = rebac.obj_type(resource) || ':' || rebac.strip(t, rebac.obj_id(resource))
+  where v.kind = 'via' and v.resource_type = rebac.obj_type(resource) and v.relation = via_children.relation
+$$;
+
+-- The containers a mirrored grant to a subject set reaches: its container, or, for a grant through a via relation
+-- (its object typed, 'workspace:w1'), the containers whose arrow points at that object.
+create or replace function rebac.set_grant_containers(g rebac.set_grant) returns setof text
+language sql stable as $$
+  select g.container where strpos(g.container, ':') = 0
+  union
+  select e.child from rebac.view_relation v
+  join rebac.edge e on e.tenant = g.tenant and e.relation = v.through and e.parent = g.container
+  where strpos(g.container, ':') > 0 and v.kind = 'via' and v.relation = g.relation
+    and v.resource_type = split_part(g.container, ':', 1)
+$$;
 
 -- The containers a pending (undelivered) revocation names for this principal, which no projection may include:
 -- SpiceDB still holds the grant until the relay delivers the delete. Read BEFORE SpiceDB is asked; a delete delivered
@@ -543,12 +703,25 @@ language sql stable as $$
       on v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
      and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(d.subject, '#') > 0 or rebac.obj_id(d.subject) = '*')))
     union
+    -- a grant to a subject set through a via relation, likewise, for what it reaches
+    select c from deleted d cross join lateral rebac.via_children(t, d.resource, d.relation) c
+    where strpos(d.subject, '#') > 0
+    union
     -- a membership of a subject set: whatever the set was granted
-    select g.container
+    select c.container
     from deleted d join rebac.view_relation v
       on v.kind = 'set' and v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
     join rebac.set_grant g on g.tenant = t
       and g.subject_set = rebac.obj_type(d.resource) || ':' || rebac.strip(t, rebac.obj_id(d.resource)) || '#' || d.relation
+    cross join lateral rebac.set_grant_containers(g) c(container)
+    where d.subject in (select s from subj)
+    union
+    -- and everything its node holds
+    select r.container
+    from deleted d join rebac.view_relation v
+      on v.kind = 'set' and v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
+    join rebac.readable r on r.tenant = t
+      and r.principal = '#' || rebac.obj_type(d.resource) || ':' || rebac.strip(t, rebac.obj_id(d.resource)) || '#' || d.relation
     where d.subject in (select s from subj)
   ),
   closure as (  -- and everything under those through self-arrows (a space's shared files)
@@ -562,18 +735,58 @@ language sql stable as $$
   select c from closure
 $$;
 
+-- The grant nodes a pending (undelivered) membership revocation takes this principal out of. Read BEFORE SpiceDB is
+-- asked, like pending_revoked: SpiceDB still answers the membership until the relay delivers its delete.
+create or replace function rebac.pending_left_nodes(t text, p text) returns setof text
+language sql stable as $$
+  with net as (
+    select distinct on (resource, relation, subject) op, resource, relation, subject
+    from rebac.outbox where tenant = t and synced_at is null
+    order by resource, relation, subject, seq desc
+  )
+  select distinct '#' || rebac.obj_type(d.resource) || ':' || rebac.strip(t, rebac.obj_id(d.resource)) || '#' || d.relation
+  from net d join rebac.view_relation v
+    on v.kind = 'set' and v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
+  where d.op = 'delete' and d.subject in (select rebac.subjects_of(t, p))
+    and rebac.strip(t, rebac.obj_id(d.resource)) is not null
+$$;
+
+-- The containers a wildcard node may hold, from the local mirror: every container granted to `T:*` and everything
+-- under those through self-arrows. A wildcard node's lookup runs as a stand-in subject (SpiceDB cannot look up a
+-- wildcard), so its answer is intersected with this: a grant made to the stand-in itself never widens anyone.
+create or replace function rebac.wildcard_closure(t text, node text) returns setof text
+language sql stable as $$
+  with recursive c(container) as (
+    select g.container from rebac.set_grant g where g.tenant = t and g.subject_set = substr(node, 2)
+    union
+    select e.child from c join rebac.edge e on e.tenant = t and e.parent = rebac.setting('resource_type') || ':' || c.container
+    join rebac.view_relation v on v.kind = 'arrow' and v.relation = e.relation and v.target_type = rebac.setting('resource_type')
+  )
+  select container from c
+$$;
+
 -- Replace a principal's projection with `containers`, minus pending revocations, at `token`. The caller holds the
 -- principal's lock (rebac.lock_principal) from BEFORE its SpiceDB lookup. `target` is 'live' or 'shadow'.
 -- `looked_up_at` is when that lookup BEGAN (the daemon reads it from this database's clock); a caller that passes
 -- none asserts the set is current now.
+-- GRANT NODES (node_grants on, live). `p` may be a node ('#group:eng#member', '#user:*'), projected like a principal
+-- under its own cap. For a principal, `nodes` is the subject-set nodes SpiceDB says it is a member of, from the same
+-- lookup: they replace its memberships (minus pending membership revocations), and its own rows keep only what no node
+-- it reads through already holds. That subtraction only saves space; a container held both ways is still read once.
 drop function if exists rebac.project(text, text, text[], text, text);
+drop function if exists rebac.project(text, text, text[], text, text, timestamptz);
 create or replace function rebac.project(t text, p text, containers text[], token text, target text default 'live',
-                                         looked_up_at timestamptz default now())
+                                         looked_up_at timestamptz default now(), nodes text[] default null)
 returns integer
 language plpgsql volatile as $$
 declare
-  cap integer := coalesce(rebac.setting('max_containers_per_principal'), '100000')::integer;
+  is_node boolean := rebac.is_node(p);
+  cap integer := case when rebac.is_node(p)
+                      then coalesce(rebac.setting('max_containers_per_node'), '1000000')::integer
+                      else coalesce(rebac.setting('max_containers_per_principal'), '100000')::integer end;
   final text[];
+  gone text[];
+  held text[];
   n integer;
 begin
   if target not in ('live', 'shadow') then
@@ -597,11 +810,32 @@ begin
 
   if exists (select 1 from rebac.principal_state where tenant = t and principal = p and state = 'retired') then
     delete from rebac.readable where tenant = t and principal = p;
+    delete from rebac.node_member where tenant = t and principal = p;
     return 0;
   end if;
   select coalesce(array_agg(distinct c), '{}') into final
   from unnest(containers) c
   where c is not null and c not in (select rebac.pending_revoked(t, p));
+  if is_node and rebac.obj_id(substr(p, 2)) = '*' then
+    -- A wildcard node holds only what the mirror says is granted to the wildcard (its lookup ran as a stand-in).
+    select coalesce(array_agg(c), '{}') into final
+    from unnest(final) c where c in (select rebac.wildcard_closure(t, p));
+  end if;
+  if not is_node and nodes is not null and rebac.nodes_on() then
+    delete from rebac.node_member m where m.tenant = t and m.principal = p
+      and (m.node <> all(nodes) or m.node in (select rebac.pending_left_nodes(t, p)));
+    insert into rebac.node_member (tenant, principal, node)
+    select distinct t, p, x from unnest(nodes) x
+    where rebac.is_node(x) and x not in (select rebac.pending_left_nodes(t, p))
+    on conflict do nothing;
+    held := array_remove(rebac.holders_of(t, p), p);
+    if cardinality(held) > 0 then
+      select coalesce(array_agg(c), '{}') into final
+      from unnest(final) c
+      where not exists (select 1 from rebac.readable r
+                        where r.tenant = t and r.principal = any(held) and r.container = c);
+    end if;
+  end if;
   n := cardinality(final);
   if n > cap then
     delete from rebac.readable where tenant = t and principal = p;
@@ -615,8 +849,11 @@ begin
   end if;
   -- A DIFF, not a rewrite: only the containers that left are deleted and only the new ones inserted, so a refresh
   -- after a small change writes a small amount (no dead tuple, no index entry, no WAL for what stayed).
-  delete from rebac.readable r where r.tenant = t and r.principal = p
-    and not exists (select 1 from unnest(final) f(c) where f.c = r.container);
+  with d as (
+    delete from rebac.readable r where r.tenant = t and r.principal = p
+      and not exists (select 1 from unnest(final) f(c) where f.c = r.container)
+    returning r.container)
+  select coalesce(array_agg(container), '{}') into gone from d;
   if n > 0 then
     insert into rebac.readable (tenant, principal, container) select t, p, c from unnest(final) c
     on conflict do nothing;
@@ -632,6 +869,23 @@ begin
     set state = 'projected', reason = null, zedtoken = excluded.zedtoken, projected_at = now(),
         n_containers = excluded.n_containers, version = rebac.principal_state.version + 1,
         looked_up_at = excluded.looked_up_at;
+  -- A NODE THAT SHRANK. Its members' own rows were subtracted against what it held, so one who also holds a lost
+  -- container directly now reads narrower: the safe direction, restored here. Few containers: ask SpiceDB who views
+  -- each (LookupSubjects); many: re-project the members.
+  if is_node and cardinality(gone) > 0 then
+    if cardinality(gone) <= 1000 or rebac.obj_id(substr(p, 2)) = '*' then
+      insert into rebac.refresh_resource (tenant, resource, zedtoken, due_at, generation)
+      select t, rebac.setting('resource_type') || ':' || rebac.prefix(t) || c, token, now(), 1 from unnest(gone) c
+      on conflict (tenant, resource) do update
+        set zedtoken = case when rebac.refresh_resource.zedtoken = '' or excluded.zedtoken = '' then ''
+                            else excluded.zedtoken end,
+            due_at = least(rebac.refresh_resource.due_at, now()),
+            generation = rebac.refresh_resource.generation + 1;
+    else
+      perform rebac.enqueue_refresh(t, m.principal, 1::smallint, token)
+      from rebac.node_member m where m.tenant = t and m.node = p;
+    end if;
+  end if;
   return n;
 end $$;
 
@@ -651,6 +905,7 @@ begin
   perform rebac.lock_principal(t, p);
   delete from rebac.readable where tenant = t and principal = p;
   delete from rebac.readable_empty where tenant = t and principal = p;
+  delete from rebac.node_member where tenant = t and principal = p;
   insert into rebac.principal_state (tenant, principal, state, reason, version)
   values (t, p, 'retired', null, 1)
   on conflict (tenant, principal) do update
@@ -674,7 +929,18 @@ $$;
 create or replace function rebac.mirror(t text, op text, resource text, relation text, subject text) returns void
 language plpgsql volatile as $$
 begin
-  if op <> 'touch' or rebac.obj_type(resource) <> rebac.setting('resource_type') then return; end if;
+  if op <> 'touch' then return; end if;
+  -- A grant to a subject set through a VIA relation (workspace#admin@group:ops#member) is mirrored with its object
+  -- typed ('workspace:w1'), so a member's leaving narrows what sits under that object at commit.
+  if strpos(subject, '#') > 0 and rebac.obj_type(resource) <> rebac.setting('resource_type')
+     and exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
+                   and vr.relation = mirror.relation and vr.kind = 'via') then
+    insert into rebac.set_grant (tenant, container, relation, subject_set)
+    values (t, rebac.obj_type(resource) || ':' || rebac.strip(t, rebac.obj_id(resource)), mirror.relation,
+            rebac.set_ref(t, subject))
+    on conflict do nothing;
+  end if;
+  if rebac.obj_type(resource) <> rebac.setting('resource_type') then return; end if;
   if exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
                and vr.relation = mirror.relation and vr.kind = 'arrow') then
     insert into rebac.edge (tenant, child, relation, parent)
@@ -682,11 +948,13 @@ begin
             rebac.obj_type(subject) || ':' || rebac.strip(t, rebac.obj_id(subject)))
     on conflict do nothing;
   end if;
-  if strpos(subject, '#') > 0
+  if (strpos(subject, '#') > 0 or rebac.obj_id(subject) = '*')
      and exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
                    and vr.relation = mirror.relation and vr.kind = 'direct') then
+    -- A wildcard grant is mirrored as its subject, 'user:*': it bounds what a wildcard node may hold.
     insert into rebac.set_grant (tenant, container, relation, subject_set)
-    values (t, rebac.strip(t, rebac.obj_id(resource)), mirror.relation, rebac.set_ref(t, subject))
+    values (t, rebac.strip(t, rebac.obj_id(resource)), mirror.relation,
+            case when rebac.obj_id(subject) = '*' then subject else rebac.set_ref(t, subject) end)
     on conflict do nothing;
   end if;
 end $$;
@@ -756,6 +1024,9 @@ begin
   truncate rebac_narrow_pairs;
   create temp table if not exists rebac_narrow_holders (tenant text, container text) on commit drop;
   truncate rebac_narrow_holders;
+  -- Memberships removed: (tenant, principal, node). Their node_member rows go, under the principal's lock.
+  create temp table if not exists rebac_narrow_members (tenant text, principal text, node text) on commit drop;
+  truncate rebac_narrow_members;
 
   -- An arrow, a grant to a subject set or a wildcard, removed: everyone who holds the container loses it. Who holds it is read
   -- only AFTER the tenant is held exclusively (below).
@@ -769,7 +1040,13 @@ begin
   from net d join rebac.view_relation v
     on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
    and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(d.subject, '#') > 0 or rebac.obj_id(d.subject) = '*')))
-  where d.op = 'delete' and v.resource_type = root;
+  where d.op = 'delete' and v.resource_type = root
+  union
+  -- a grant to a subject set through a via relation: every holder of what it reaches (rows from before the set's node
+  -- was projected, or 0.2's, hold it under the members' own names)
+  select distinct d.tenant, c
+  from net d cross join lateral rebac.via_children(d.tenant, d.resource, d.relation) c
+  where d.op = 'delete' and strpos(d.subject, '#') > 0;
 
   perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
   if hold_tenants then
@@ -807,13 +1084,6 @@ begin
       on v.kind = 'via' and v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
     join rebac.edge e on e.tenant = d.tenant and e.relation = v.through
       and e.parent = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource))
-  ),
-  membership as (  -- a member leaves a subject set: they lose what the set was granted
-    select d.tenant, d.subject, g.container
-    from del d join rebac.view_relation v
-      on v.kind = 'set' and v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
-    join rebac.set_grant g on g.tenant = d.tenant
-      and g.subject_set = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource)) || '#' || d.relation
   )
   insert into rebac_narrow_pairs (tenant, principal, container)
   select x.tenant, p, rebac.strip(x.tenant, rebac.obj_id(x.resource))
@@ -822,12 +1092,22 @@ begin
   select x.tenant, p, x.container
   from via x cross join lateral rebac.principals_of(x.tenant, x.subject) p
   union
-  select x.tenant, p, x.container
-  from membership x cross join lateral rebac.principals_of(x.tenant, x.subject) p
-  union
   -- a new statement, so a new snapshot: it sees every refresh that committed while the tenant lock was awaited
   select r.tenant, r.principal, r.container
   from rebac_narrow_holders a join rebac.readable r on r.tenant = a.tenant and r.container = a.container;
+
+  insert into rebac_narrow_members (tenant, principal, node)
+  with net as (
+    select distinct on (resource, relation, subject) tenant, op, resource, relation, subject
+    from rebac.outbox where seq = any(seqs)
+    order by resource, relation, subject, seq desc
+  )
+  select distinct d.tenant, p,
+         '#' || rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource)) || '#' || d.relation
+  from net d join rebac.view_relation v
+    on v.kind = 'set' and v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
+  cross join lateral rebac.principals_of(d.tenant, d.subject) p
+  where d.op = 'delete' and rebac.strip(d.tenant, rebac.obj_id(d.resource)) is not null;
 
   -- Everything under a lost container through self-arrows goes with it (a space's shared files).
   with recursive closure(tenant, principal, container) as (
@@ -839,6 +1119,18 @@ begin
     join rebac.view_relation v on v.kind = 'arrow' and v.relation = e.relation and v.target_type = root
   )
   insert into rebac_narrow_pairs select * from closure
+  except select * from rebac_narrow_pairs;
+
+  -- A NODE that loses a container: so does every member's own copy of it (and, through the closure above, of
+  -- anything under it). Such a copy is a row its member stored before the node held it; it is read through the node
+  -- and must not outlive the node's. A wildcard node's members are everyone; a set node's, its node_member rows.
+  insert into rebac_narrow_pairs
+  select r.tenant, r.principal, r.container
+  from (select distinct tenant, principal, container from rebac_narrow_pairs where rebac.is_node(principal)) n
+  join rebac.readable r on r.tenant = n.tenant and r.container = n.container and not rebac.is_node(r.principal)
+  where rebac.obj_id(substr(n.principal, 2)) = '*'
+     or exists (select 1 from rebac.node_member m where m.tenant = r.tenant and m.principal = r.principal
+                  and m.node = n.principal)
   except select * from rebac_narrow_pairs;
 
   -- Removed arrows leave the edge table now that narrowing has used them.
@@ -857,15 +1149,22 @@ begin
     from rebac.outbox where seq = any(seqs)
     order by resource, relation, subject, seq desc
   ) n
-  where n.op = 'delete' and strpos(n.subject, '#') > 0 and g.tenant = n.tenant and g.relation = n.relation
-    and g.container = rebac.strip(n.tenant, rebac.obj_id(n.resource)) and g.subject_set = rebac.set_ref(n.tenant, n.subject);
+  where n.op = 'delete' and (strpos(n.subject, '#') > 0 or rebac.obj_id(n.subject) = '*')
+    and g.tenant = n.tenant and g.relation = n.relation
+    and g.container = case when rebac.obj_type(n.resource) = root then rebac.strip(n.tenant, rebac.obj_id(n.resource))
+                           else rebac.obj_type(n.resource) || ':' || rebac.strip(n.tenant, rebac.obj_id(n.resource)) end
+    and g.subject_set = case when rebac.obj_id(n.subject) = '*' then n.subject else rebac.set_ref(n.tenant, n.subject) end;
 
-  if not exists (select 1 from rebac_narrow_pairs) then return 0; end if;
+  if not exists (select 1 from rebac_narrow_pairs) and not exists (select 1 from rebac_narrow_members) then
+    return 0;
+  end if;
 
   -- A lookup that began before this revocation may be in flight under the principal's lock: wait for it, so it
-  -- cannot write the grant back afterwards. Sorted, and bounded, so this cannot deadlock against the daemon.
+  -- cannot write the grant back afterwards. Sorted, and bounded, so this cannot deadlock against the daemon. A grant
+  -- node is locked here like a principal.
   perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
-  for rec_p in select distinct tenant, principal from rebac_narrow_pairs order by tenant, principal loop
+  for rec_p in select tenant, principal from rebac_narrow_pairs union select tenant, principal from rebac_narrow_members
+               order by tenant, principal loop
     if hold_tenants then
       perform rebac.lock_principal(rec_p.tenant, rec_p.principal);
     else
@@ -876,13 +1175,48 @@ begin
   end loop;
   perform set_config('lock_timeout', prior, true);
 
+  -- A MEMBER WHO LEAVES A SET loses their OWN rows of what the set holds, or of anything under it through
+  -- self-arrows: rows written before the node was projected, or before it learned of a child, or by 0.2. Read now,
+  -- under the member's lock, so a refresh in flight has committed. Each own row is walked UP its parents and goes if
+  -- it or an ancestor is the node's or mirrored for the set; reading through the node ends with its membership row.
+  insert into rebac_narrow_pairs (tenant, principal, container)
+  select a.tenant, a.principal, a.orig
+  from (
+    with recursive up(tenant, principal, node, orig, cur) as (
+      select m.tenant, m.principal, m.node, r.container, r.container
+      from rebac_narrow_members m join rebac.readable r on r.tenant = m.tenant and r.principal = m.principal
+      union
+      select u.tenant, u.principal, u.node, u.orig,
+             case when starts_with(e.parent, root || ':') then substr(e.parent, length(root) + 2) else e.parent end
+      from up u join rebac.edge e on e.tenant = u.tenant and e.child = u.cur
+      join rebac.view_relation v on v.kind = 'arrow' and v.relation = e.relation and v.resource_type = root
+      where strpos(u.cur, ':') = 0   -- an arrow to another type is one hop: its object ('workspace:w1') ends the walk
+    )
+    select * from up) a
+  where exists (select 1 from rebac.set_grant g where g.tenant = a.tenant and g.subject_set = substr(a.node, 2)
+                  and g.container = a.cur)
+     or exists (select 1 from rebac.readable n where n.tenant = a.tenant and n.principal = a.node
+                  and n.container = a.cur)
+  except select * from rebac_narrow_pairs;
+
   delete from rebac.readable r using rebac_narrow_pairs n
   where r.tenant = n.tenant and r.principal = n.principal and r.container = n.container;
   get diagnostics removed = row_count;
+  -- Remembered on the revocations themselves, for the refreshes their delivery queues (rebac.queue_refreshes).
+  update rebac.outbox o set narrowed = array(select distinct x from unnest(coalesce(o.narrowed, '{}') || n.ps) x)
+  from (select tenant, array_agg(distinct principal) as ps from rebac_narrow_pairs group by tenant) n
+  where o.seq = any(seqs) and o.op = 'delete' and o.tenant = n.tenant;
+  update rebac.outbox o
+  set narrowed_containers = array(select distinct x from unnest(coalesce(o.narrowed_containers, '{}') || n.cs) x)
+  from (select tenant, array_agg(distinct container) as cs from rebac_narrow_pairs where rebac.is_node(principal)
+        group by tenant) n
+  where o.seq = any(seqs) and o.op = 'delete' and o.tenant = n.tenant;
+  delete from rebac.node_member m using rebac_narrow_members n
+  where m.tenant = n.tenant and m.principal = n.principal and m.node = n.node;
 
   update rebac.principal_state s set version = s.version + 1,
     n_containers = (select count(*) from rebac.readable r where r.tenant = s.tenant and r.principal = s.principal)
-  from (select distinct tenant, principal from rebac_narrow_pairs) n
+  from (select tenant, principal from rebac_narrow_pairs union select tenant, principal from rebac_narrow_members) n
   where s.tenant = n.tenant and s.principal = n.principal;
   -- Narrowed to nothing is a known answer, "nothing", not "never asked".
   insert into rebac.readable_empty (tenant, principal, checked_at)
@@ -893,7 +1227,12 @@ begin
   on conflict (tenant, principal) do update set checked_at = now();
 
   for rec_h in select fn from rebac.narrow_hook loop
-    for rec_p in select tenant, array_agg(distinct container) as containers from rebac_narrow_pairs group by tenant loop
+    -- A membership removed narrows what its node holds, for that member.
+    for rec_p in select x.tenant, array_agg(distinct x.container) as containers from (
+                   select tenant, container from rebac_narrow_pairs
+                   union select m.tenant, r.container from rebac_narrow_members m
+                   join rebac.readable r on r.tenant = m.tenant and r.principal = m.node) x
+                 group by x.tenant loop
       execute format('select %s($1, $2)', rec_h.fn::regproc) using rec_p.tenant, rec_p.containers;
     end loop;
   end loop;
@@ -1236,6 +1575,22 @@ returns integer
 language plpgsql volatile as $$
 declare queued integer := 0; n integer;
 begin
+  -- Everyone a delivered revocation narrowed without naming them, at its token (see rebac.outbox.narrowed).
+  select count(*) into n from (
+    select distinct o.tenant, x.principal from rebac.outbox o cross join lateral unnest(o.narrowed) x(principal)
+    where o.seq = any(delivered) and o.narrowed is not null
+  ) w, lateral (select rebac.enqueue_refresh(w.tenant, w.principal, 0::smallint, token)) y;
+  queued := queued + n;
+  insert into rebac.refresh_resource (tenant, resource, zedtoken, due_at, generation)
+  select distinct o.tenant, rebac.setting('resource_type') || ':' || rebac.prefix(o.tenant) || x, token, now(), 1
+  from rebac.outbox o cross join lateral unnest(o.narrowed_containers) x
+  where o.seq = any(delivered) and o.narrowed_containers is not null
+  on conflict (tenant, resource) do update
+    set zedtoken = case when rebac.refresh_resource.zedtoken = '' or excluded.zedtoken = '' then ''
+                        else excluded.zedtoken end,
+        due_at = least(rebac.refresh_resource.due_at, now()),
+        generation = rebac.refresh_resource.generation + 1;
+
   -- Direct and via relations name their subject: refresh the principals it stands for. A revocation first.
   with rows as (
     select o.tenant, o.op, o.subject
@@ -1250,12 +1605,15 @@ begin
   select count(*) into n from targets t, lateral (select rebac.enqueue_refresh(t.tenant, t.principal, t.pri, token)) x;
   queued := queued + n;
 
-  -- Arrow tuples and grants to a subject set name no reader: queue their resource for a LookupSubjects.
+  -- Arrow tuples and grants to a subject set name no reader: queue their resource for a LookupSubjects. With node
+  -- grants on, a grant to a set or a wildcard names its NODE (above), so only its removal needs the resource: who
+  -- else still views it, directly or through another node, is re-projected.
   insert into rebac.refresh_resource (tenant, resource, zedtoken, due_at, generation)
   select distinct o.tenant, o.resource, token, now(), 1
   from rebac.outbox o join rebac.view_relation v
     on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation
-   and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(o.subject, '#') > 0 or rebac.obj_id(o.subject) = '*')))
+   and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(o.subject, '#') > 0 or rebac.obj_id(o.subject) = '*')
+                             and (o.op = 'delete' or not rebac.nodes_on())))
   where o.seq = any(delivered)
   on conflict (tenant, resource) do update
     set zedtoken = case when rebac.refresh_resource.zedtoken = '' or excluded.zedtoken = '' then ''
@@ -1265,15 +1623,16 @@ begin
   get diagnostics n = row_count;
   queued := queued + n;
 
-  -- A wildcard GRANTED (container#member@user:*) reaches every principal, and LookupSubjects names none of them: refresh
-  -- everyone the tenant knows. (Removed, it narrowed every holder; the resource queued above restores who keeps it.)
+  -- A wildcard GRANTED (container#member@user:*) reaches every principal, and LookupSubjects names none of them: with
+  -- node grants off, refresh everyone the tenant knows (on, its node was queued above, and everyone reads through it).
+  -- (Removed, it narrowed every holder; the resource queued above restores who keeps it.)
   select count(*) into n from (
     select distinct o.tenant, x.principal
     from rebac.outbox o join rebac.view_relation v
       on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation and v.kind = 'direct'
     cross join lateral (select ps.principal from rebac.principal_state ps where ps.tenant = o.tenant and ps.state <> 'retired'
                         union select su.principal from rebac.subject su where su.tenant = o.tenant) x
-    where o.seq = any(delivered) and o.op = 'touch' and rebac.obj_id(o.subject) = '*'
+    where o.seq = any(delivered) and o.op = 'touch' and rebac.obj_id(o.subject) = '*' and not rebac.nodes_on()
   ) w, lateral (select rebac.enqueue_refresh(w.tenant, w.principal, 1::smallint, token)) y;
   return queued + n;
 end $$;
@@ -1317,6 +1676,7 @@ language sql volatile as $$
 $$;
 
 -- The subjects SpiceDB says can view a resource now: refresh the principals they stand for, and the resource is done.
+-- `subjects` holds the subject sets SpiceDB names too (`group:acme/eng#member`), which stand for their nodes.
 create or replace function rebac.complete_refresh_resource(t text, res text, gen bigint, subjects text[], token text)
 returns integer
 language plpgsql volatile as $$
@@ -1328,7 +1688,7 @@ begin
     -- A wildcard among them (user:*) names nobody: everyone the tenant knows may view it.
     select x.principal from (select ps.principal from rebac.principal_state ps where ps.tenant = t and ps.state <> 'retired'
                              union select su.principal from rebac.subject su where su.tenant = t) x
-    where exists (select 1 from unnest(subjects) s where rebac.obj_id(s) = '*')
+    where exists (select 1 from unnest(subjects) s where rebac.obj_id(s) = '*') and not rebac.nodes_on()
   ) x, lateral (select rebac.enqueue_refresh(t, x.principal, 1::smallint, token)) y;
   delete from rebac.refresh_resource where tenant = t and resource = res and generation = gen;
   update rebac.refresh_resource set leased_until = null where tenant = t and resource = res;
@@ -1370,6 +1730,8 @@ begin
   with everyone as (
     select tenant, principal from rebac.principal_state where state <> 'retired'
     union select tenant, principal from rebac.subject
+    -- every grant node the mirror names, projected or not yet
+    union select tenant, '#' || subject_set from rebac.set_grant where rebac.nodes_on()
   ), q as (
     insert into rebac.refresh (tenant, principal, priority, due_at, generation)
     select tenant, principal, 2, now(), 1 from everyone
@@ -1550,3 +1912,19 @@ language sql volatile as $$
   insert into rebac.closure_state (id, state, reason, changed_at) values (true, 'valid', null, '-infinity')
   on conflict (id) do update set state = 'valid', reason = null
 $$;
+
+-- UPGRADING FROM 0.2: rows already projected hold every grant expanded per principal, and no membership has been
+-- recorded, so a grant to a set reaches those principals only once each is re-projected. The first install of this
+-- version forces the sweep to do that (reads stay correct meanwhile: the expanded rows are still read).
+-- 0.2's mirrors also lack grants to sets through a via relation, and wildcard grants: `remirror_pending` makes rebacd
+-- re-read every tenant's relationships once at its next start (rebacd backfill does the same for one tenant).
+do $$
+begin
+  if not exists (select 1 from rebac.config where key = 'node_grants_installed') then
+    update rebac.sweep_claim set last_at = now() - interval '1 year';
+    insert into rebac.config (key, value) values ('node_grants_installed', now()::text);
+    if exists (select 1 from rebac.principal_state) then
+      insert into rebac.config (key, value) values ('remirror_pending', now()::text) on conflict (key) do nothing;
+    end if;
+  end if;
+end $$;

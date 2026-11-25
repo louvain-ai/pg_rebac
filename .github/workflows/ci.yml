@@ -49,6 +49,8 @@ jobs:
       REBAC_TEST_URL: postgres://postgres:rebac@127.0.0.1:55433
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the upgrade test reads the last release's SQL from its tag
       - run: tests/sql/run.sh
       # Hosted Postgres installs as a database owner that is not a superuser: that must work, with and without pgvector
       # (install_as_owner.sh), and the whole suite must pass as that role (a superuser only creates the extensions).
@@ -56,10 +58,14 @@ jobs:
       - name: SQL suite as a non-superuser owner
         run: REBAC_TEST_AS_OWNER=1 tests/sql/run.sh
       # THE REVOCATION RACES, repeated: two sessions (dblink) race a refresh against a revocation in both orders, and
-      # a held lock fails the commit (fault injection); 13 races one against a revocation applied from Watch. Deterministic by construction; repeated to catch a regression
+      # a held lock fails the commit (fault injection); 13 races one against a revocation applied from Watch, 19 a grant
+      # node's and a member's refresh against set-grant and membership revocations. Deterministic by construction; repeated to catch a regression
       # that only loses sometimes.
       - name: revocation vs refresh races, 20 rounds
-        run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' && tests/sql/run.sh '13_*' || exit 1; done
+        run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' && tests/sql/run.sh '1[39]_*' || exit 1; done
+      # The upgrade from the last release: its SQL, projected as it did, then this commit's applied twice.
+      - name: upgrade from 0.2.0
+        run: tests/upgrade/run.sh v0.2.0
 
   # THROUGH A POOLER: PgBouncer in transaction mode with one server connection, so every client shares a backend. A
   # session SET leaks and SET LOCAL does not; a fenced read, a revocation at commit and set_principal work through it.
