@@ -268,7 +268,7 @@ section + section { border-top: 1px solid var(--line); }
   body { font-size: 16px; }
   h1 { font-size: 2.35rem; }
   .code { font-size: 12px; padding-left: 12px; padding-right: 12px; }
-  .cmd .code { padding: 12px 12px 52px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cmd .code { padding: 12px 12px 52px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .install .block-cmd .block { padding: 12px 12px 52px; }
   .copy { top: auto; bottom: 8px; right: 8px; }
   .pane figcaption { padding-left: 12px; }
