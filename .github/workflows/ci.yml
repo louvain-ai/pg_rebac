@@ -182,15 +182,15 @@ jobs:
       - run: examples/quickstart/bundle.sh --check
       # A release pull request bundles the version it is about to publish; until publish.yml has run, there is
       # nothing to serve, and publish.yml runs this same check against what it published.
-      - name: The served file, piped as a reader runs it
+      - name: The served file, as a reader runs it
         run: |
           version="$(sed -n 's/^# pg_rebac version: //p' site/public/quickstart.yml)"
           curl -fsIL -o /dev/null "https://github.com/louvain-ai/pg_rebac/releases/download/v$version/pg_rebac--$version.sql" ||
             { echo "::notice::pg_rebac $version is not published yet; publish.yml checks the served file once it is"; exit 0; }
           cd "$(mktemp -d)"
-          docker compose -f - run --rm demo < "$GITHUB_WORKSPACE/site/public/quickstart.yml" 2>&1 | tee out
+          docker compose -f <(cat "$GITHUB_WORKSPACE/site/public/quickstart.yml") run --rm demo 2>&1 | tee out
           "$GITHUB_WORKSPACE/examples/quickstart/check-output.sh" out
-          docker compose -f - down -v < "$GITHUB_WORKSPACE/site/public/quickstart.yml"
+          docker compose -f <(cat "$GITHUB_WORKSPACE/site/public/quickstart.yml") down -v
       - name: From a clone
         run: |
           docker compose -f examples/quickstart/docker-compose.yml run --rm demo 2>&1 | tee out

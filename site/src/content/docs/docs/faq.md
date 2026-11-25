@@ -22,7 +22,7 @@ may not see.
   ranked, counted or returned.
 
 The [quickstart](/docs/getting-started/#see-it-work-in-one-command) shows the first point on seventeen rows:
-`curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo` runs one vector search as two
+`docker compose -f <(curl -fsSL https://pgrebac.com/quickstart.yml) run --rm demo` runs one vector search as two
 people, then filters after retrieval, and the second person gets one row of five.
 
 ## Why not plain row-level security?

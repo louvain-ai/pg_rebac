@@ -50,8 +50,12 @@ same plan as a full-text match, a join or anything else, and applies before the 
 With Docker (Compose 2.23 or later), and nothing to clone:
 
 ```sh
-curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo
+docker compose -f <(curl -fsSL https://pgrebac.com/quickstart.yml) run --rm demo
 ```
+
+The `<(…)` is process substitution, in bash and zsh; it keeps your terminal attached, so the SQL is
+highlighted. In another shell, download the file first: `curl -fsSLO https://pgrebac.com/quickstart.yml && docker
+compose -f quickstart.yml run --rm demo`.
 
 It starts Postgres with pgvector, SpiceDB (in memory) and the released `rebacd` image, installs the release's SQL
 (checked against its SHA-256), writes a small dataset's relationships through `rebac.write`, and waits for the daemon to
@@ -127,7 +131,7 @@ HINT:  ask the daemon (POST /lookup) to project it, then retry
 
 You just saw one vector search return different rows per person, fenced inside the query, and a revocation
 in force at commit. Stop it and forget everything:
-  curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v
+  docker compose -f <(curl -fsSL https://pgrebac.com/quickstart.yml) down -v
 Docs: https://pgrebac.com/docs/getting-started/
 ```
 

@@ -194,7 +194,7 @@ HINT:  ask the daemon (POST /lookup) to project it, then retry
 
 <span class="c">You just saw one vector search return different rows per person, fenced inside the query,
 and a revocation in force at commit. Stop it and forget everything:</span>
-  curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v
+  docker compose -f &lt;(curl -fsSL https://pgrebac.com/quickstart.yml) down -v
 <span class="c">Docs:</span> https://pgrebac.com/docs/getting-started/</code></pre>
         <h3 class="next-title">Next steps</h3>
         <ul class="next">
