@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The whole release, in order, by the owner, after the release is approved:
 #   scripts/release.sh <version> [--dry-run]
+# RELEASE_BRANCH=release-0.2 releases a patch from a maintenance branch (default: main).
 # Each publishing step asks first. --dry-run runs every step's dry-run form (no tag, no push, no publish).
 # Needs: git remote `origin` (push access), cargo logged in to crates.io, npm logged in with publish rights to pg-rebac.
 set -euo pipefail
@@ -24,7 +25,8 @@ done
 [ -z "$(git status --porcelain)" ] || { echo "working tree is not clean" >&2; exit 1; }
 if [ "$dry" = 0 ]; then
   git fetch origin main
-  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "HEAD is not origin/main: merge the release branch and push first" >&2; exit 1; }
+  branch="${RELEASE_BRANCH:-main}"
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch")" ] || { echo "HEAD is not origin/$branch: merge the release branch and push first" >&2; exit 1; }
 fi
 
 echo "== 1. tag and push (starts the GitHub Release and the ghcr image workflows)"
