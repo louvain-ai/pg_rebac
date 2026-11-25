@@ -6,6 +6,9 @@ import "../styles/cover.css";
 import LouvainMark from "../components/LouvainMark.astro";
 import MadeBy from "../components/MadeBy.astro";
 import { users } from "../data/users";
+import { quickstart, quickstartLines } from "../data/demo";
+import TwoReaders from "../components/TwoReaders.astro";
+import HowItWorks from "../components/HowItWorks.astro";
 
 // Previews and local builds are never indexed; only the production deployment is (see astro.config.mjs).
 const indexable = process.env.VERCEL_ENV === "production";
@@ -25,7 +28,21 @@ const description =
     {/* Starlight writes the docs pages' canonical from `site`; this cover is outside Starlight, so it writes its own. */}
     <link rel="canonical" href={new URL("/", Astro.site).href} />
     {!indexable && <meta name="robots" content="noindex, nofollow" />}
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#f4f6f8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#10141b" media="(prefers-color-scheme: dark)" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="pg_rebac" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={new URL("/", Astro.site).href} />
+    <meta property="og:image" content={new URL("/og.png", Astro.site).href} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="pg_rebac: search everything, return only what's authorized." />
+    <meta name="twitter:card" content="summary_large_image" />
     <script is:inline>
       // Share Starlight's stored theme, so the cover and the docs agree.
       (() => {
@@ -66,16 +83,31 @@ const description =
             <code>rebac.fenced_ids</code> returns the k nearest rows a person may read. Either way the fence applies
             before the <code>order by</code> and the <code>limit</code>.
           </p>
-          <div class="actions">
-            <a class="btn primary" href="/docs/getting-started/">Get started</a>
-            <a class="btn gh" href={repo}><GitHubMark size={18} />Source on GitHub</a>
+          <div class="try">
+            <p class="try-label" id="try-label">One command, with Docker. Nothing to clone.</p>
+            <div class="cmd" data-copy={quickstart}>
+              <pre class="code" tabindex="0" aria-labelledby="try-label"><code><span class="prompt" aria-hidden="true">$ </span>{quickstartLines}</code></pre>
+            </div>
           </div>
+          <p class="actions">
+            <a href="/docs/getting-started/">Getting started</a>
+            <a class="gh" href={repo}><GitHubMark size={16} />Source on GitHub</a>
+          </p>
         </div>
+        <TwoReaders />
+      </section>
 
+      <section class="how" aria-labelledby="how">
+        <h2 id="how">How it works</h2>
+        <p class="section-lede">
+          SpiceDB stays the authority. pg_rebac keeps a local, indexed copy of who may view which container, and your
+          query joins to it.
+        </p>
+        <HowItWorks />
         <figure class="pair" aria-label="A fenced query and the plan Postgres chooses for it">
           <div class="pane">
             <figcaption>The query</figcaption>
-            <pre class="code"><code><span class="k">begin</span>;
+            <pre class="code" tabindex="0"><code><span class="k">begin</span>;
 <span class="k">set local</span> rebac.tenant = <span class="s">'acme'</span>;
 
 <span class="k">select</span> p.id, p.body
@@ -86,7 +118,7 @@ const description =
           </div>
           <div class="pane plan">
             <figcaption>What Postgres plans</figcaption>
-            <pre class="code"><code>Limit
+            <pre class="code" tabindex="0"><code>Limit
   <span class="c">-&gt;</span>  Index Scan using passage_embedding_idx on passage x
         Order By: (embedding &lt;=&gt; $1)
         Filter: (SubPlan 1)
@@ -112,9 +144,11 @@ const description =
           the released SQL, writes the relationships through <code>rebac.write</code>, and runs one vector search as two
           people.
         </p>
-        <pre class="code block"><code>curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo</code></pre>
+        <div class="cmd block-cmd" data-copy={quickstart}>
+          <pre class="code block" tabindex="0"><code><span class="prompt" aria-hidden="true">$ </span>{quickstartLines}</code></pre>
+        </div>
         <p class="transcript-label">What it prints, abridged:</p>
-        <pre class="code block transcript"><code><span class="c">1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:</span>
+        <pre class="code block transcript" tabindex="0"><code><span class="c">1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:</span>
 
    as alice (reads handbook and payroll)
    handbook  | Annual pay review
@@ -270,7 +304,7 @@ and a revocation in force at commit. Stop it and forget everything:</span>
             </p>
           </article>
           <div>
-            <pre class="code block"><code><span class="c"># the engine, Postgres, pg_rebac, SpiceDB and rebacd</span>
+            <pre class="code block" tabindex="0"><code><span class="c"># the engine, Postgres, pg_rebac, SpiceDB and rebacd</span>
 git clone https://github.com/louvain-ai/louvain-engine
 cd louvain-engine &amp;&amp; examples/pg-rebac/run.sh
 
@@ -306,12 +340,39 @@ cd louvain-engine &amp;&amp; examples/pg-rebac/run.sh
     </main>
 
     <footer class="foot">
-      <MadeBy />
-      <p>Apache-2.0. <a class="gh" href={repo}><GitHubMark size={14} />github.com/louvain-ai/pg_rebac</a>. SpiceDB is a project of Authzed; pg_rebac is
-        not affiliated with it.</p>
+      <div class="foot-row">
+        <MadeBy />
+        <a class="gh foot-gh" href={repo}><GitHubMark size={16} />louvain-ai/pg_rebac</a>
+      </div>
+      <p class="foot-fine">Apache-2.0. SpiceDB is a project of Authzed; pg_rebac is not affiliated with it.</p>
     </footer>
 
     <script is:inline>
+      // A copy button on each command; it copies the one-line form in data-copy. Built here, not in the markup, so a
+      // page without script shows no dead control.
+      for (const box of document.querySelectorAll("[data-copy]")) {
+        const text = box.dataset.copy;
+        if (!text || !navigator.clipboard) continue;
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "copy";
+        b.textContent = "Copy";
+        b.setAttribute("aria-label", "Copy the command");
+        const live = document.createElement("span");
+        live.className = "sr";
+        live.setAttribute("aria-live", "polite");
+        b.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(text);
+            b.textContent = "Copied";
+            live.textContent = "Copied to the clipboard";
+          } catch {
+            b.textContent = "Select and copy";
+          }
+          setTimeout(() => { b.textContent = "Copy"; live.textContent = ""; }, 1600);
+        });
+        box.append(b, live);
+      }
       document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
         const root = document.documentElement;
         const dark = root.dataset.theme

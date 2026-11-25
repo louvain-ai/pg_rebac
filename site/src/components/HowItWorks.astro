@@ -1,0 +1,81 @@
+---
+// SpiceDB -> rebacd -> rebac.readable -> the join in your query. Two drawings of the same diagram: across on a wide
+// screen, down on a narrow one. Only one is displayed, so only one is in the accessibility tree.
+const label =
+  "SpiceDB holds the relationships. rebacd reads them through Watch and LookupResources and writes rows into rebac.readable, an indexed table in your Postgres. Your query joins to rebac.readable on container, and Postgres plans it as one more join.";
+const nodes = [
+  { title: "SpiceDB", lines: ["relationships,", "the authority"], mono: false },
+  { title: "rebacd", lines: ["Watch, lookups,", "refresh, relay"], mono: false },
+  { title: "rebac.readable", lines: ["(tenant, principal,", "container), indexed"], mono: true },
+  { title: "your query", lines: ["container in", "readable_set(p)"], mono: true },
+];
+const edges = ["changes", "rows", "semi-join"];
+// Wide: 4 nodes of 176 across 960.
+const W = 176, H = 92, gap = (960 - 4 * W) / 3;
+// Tall: 4 nodes down 340 wide.
+const TW = 300, TH = 84, tgap = 44;
+const pgY = 2 * (TH + tgap) + 8, pgH = 2 * TH + tgap + 24, tallH = pgY + pgH + 30;
+---
+<figure class="flow">
+  <svg class="flow-wide" viewBox="-14 0 988 132" role="img" aria-label={label}>
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0L10 5L0 10z" class="flow-head" />
+      </marker>
+    </defs>
+        <text x={2 * (W + gap)} y="16" class="flow-zone">inside your Postgres</text>
+    <rect x={2 * (W + gap) - 12} y="26" width={2 * W + gap + 24} height={H + 12} rx="8" class="flow-pg" />
+    {nodes.map((n, i) => {
+      const x = i * (W + gap);
+      return (
+        <g>
+          <rect x={x} y="32" width={W} height={H} rx="6" class={i === 3 ? "flow-node is-you" : "flow-node"} />
+          <text x={x + 16} y="62" class={n.mono ? "flow-title mono" : "flow-title"}>{n.title}</text>
+          {n.lines.map((l, j) => <text x={x + 16} y={86 + j * 18} class={i === 3 ? "flow-sub mono" : "flow-sub"}>{l}</text>)}
+        </g>
+      );
+    })}
+    {edges.map((e, i) => {
+      const x1 = i * (W + gap) + W + 4, x2 = (i + 1) * (W + gap) - 4;
+      return (
+        <g>
+          <line x1={x1} y1="78" x2={x2} y2="78" class="flow-edge" marker-end="url(#ah)" />
+          <text x={(x1 + x2) / 2} y="70" text-anchor="middle" class="flow-edge-label">{e}</text>
+        </g>
+      );
+    })}
+  </svg>
+  <svg class="flow-tall" viewBox={`0 0 340 ${tallH}`} role="img" aria-label={label}>
+    <defs>
+      <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0L10 5L0 10z" class="flow-head" />
+      </marker>
+    </defs>
+    <rect x="8" y={pgY} width="324" height={pgH} rx="8" class="flow-pg" />
+    <text x="332" y={pgY + pgH + 20} text-anchor="end" class="flow-zone">inside your Postgres</text>
+    {nodes.map((n, i) => {
+      const y = 20 + i * (TH + tgap);
+      return (
+        <g>
+          <rect x="20" y={y} width={TW} height={TH} rx="6" class={i === 3 ? "flow-node is-you" : "flow-node"} />
+          <text x="36" y={y + 30} class={n.mono ? "flow-title mono" : "flow-title"}>{n.title}</text>
+          <text x="36" y={y + 56} class={i === 3 ? "flow-sub mono" : "flow-sub"}>{n.lines.join(" ")}</text>
+        </g>
+      );
+    })}
+    {edges.map((e, i) => {
+      const y1 = 20 + i * (TH + tgap) + TH + 4, y2 = 20 + (i + 1) * (TH + tgap) - 4;
+      return (
+        <g>
+          <line x1="60" y1={y1} x2="60" y2={y2} class="flow-edge" marker-end="url(#ah2)" />
+          <text x="74" y={(y1 + y2) / 2 + 5} class="flow-edge-label">{e}</text>
+        </g>
+      );
+    })}
+  </svg>
+  <figcaption>
+    Reads stay local: nothing on the read path calls SpiceDB or the daemon. Writes go the other way.
+    <code>rebac.write</code> queues them in an outbox inside your transaction, a deferred trigger removes revoked
+    containers at commit, and rebacd relays the outbox to SpiceDB in order.
+  </figcaption>
+</figure>

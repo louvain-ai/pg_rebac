@@ -1,0 +1,33 @@
+---
+// One query, two readers: the quickstart's first result drawn from src/data/demo.ts. Markup rather than one wide
+// SVG so each reader's panel stays legible when the two stack on a phone.
+import { readers } from "../data/demo";
+---
+<figure class="readers" aria-labelledby="readers-cap">
+  <pre class="readers-q" tabindex="0"><code><span class="k">select</span> p.title
+<span class="k">from</span> <span class="f">rebac.fenced_ids</span>(:who, <span class="s">'passage'</span>, :query, 5) f
+<span class="k">join</span> passage p <span class="k">on</span> p.id::text = f.id
+<span class="k">order by</span> f.distance;  <span class="c">-- "salary pay review"</span></code></pre>
+  <div class="readers-pair">
+    {readers.map((r) => (
+      <section class="reader" aria-label={`Rows returned to ${r.name}`}>
+        <header>
+          <span class="who">{r.name}</span>
+          <span class="reads">reads {r.reads.join(" and ")}</span>
+        </header>
+        <ol>
+          {r.rows.map((row) => (
+            <li data-c={row.container}>
+              <span class="t">{row.title}</span>
+              <span class="c">{row.container}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+    ))}
+  </div>
+  <figcaption id="readers-cap">
+    The same query as two people, from the quickstart. Filtered after retrieval instead, bob gets 1 row of 5: board
+    passages he cannot read take the other 4 places, and no error says so.
+  </figcaption>
+</figure>
