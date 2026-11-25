@@ -85,7 +85,7 @@ A release is one act: merging the release pull request.
 - **The manual fallback**, when GitHub Actions cannot run the release: `scripts/release.sh X.Y.Z` from the release
   commit. It asks before each step and skips what is published; run it with `--dry-run` first.
 
-To verify a release image:
+To verify a release image (cosign 3 or later; the signature is stored as an OCI referrer):
 
 ```sh
 cosign verify ghcr.io/louvain-ai/rebacd:X.Y.Z --certificate-oidc-issuer https://token.actions.githubusercontent.com \
