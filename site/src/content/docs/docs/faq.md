@@ -1,6 +1,6 @@
 ---
 title: FAQ
-description: pg_rebac against filtering after retrieval, Postgres row-level security, SpiceDB on its own, AuthZed Materialize and the SpiceDB FDW, and the name.
+description: pg_rebac against filtering after retrieval, Postgres row-level security, SpiceDB on its own, AuthZed Materialize and the SpiceDB FDW, security fixes, and the name.
 ---
 
 ## Why not just filter results after retrieval?
@@ -84,6 +84,16 @@ custom extensions. The `rebacd` daemon needs only an ordinary connection.
 
 The schema targets Postgres 14 and later. The test suite and the planner study run on Postgres 17 with pgvector
 0.8. Fenced ANN reads need pgvector 0.8 or later for `hnsw.iterative_scan`.
+
+## Security fixes
+
+**0.2.1** fixes a revocation that was not in force at commit. Where a relation reached through an arrow accepts a
+subject set (`workspace#admin: user | group#member`, with `view = ... + workspace->admin`), removing a member from the
+set, or removing the set's grant, left the containers readable until the next refresh: at the latest the freshness
+bound, one hour by default. 0.1.0 to 0.2.0 are affected. Schemas whose via relations accept no subject set are not.
+
+Upgrade to 0.2.1: re-run `rebac.sql`, restart `rebacd`, and run `rebacd backfill --tenant <t>` for each tenant. The
+[changelog](https://github.com/louvain-ai/pg_rebac/blob/v0.2.1/CHANGELOG.md#021) has the details.
 
 ## Who runs it in production?
 

@@ -52,8 +52,8 @@ does:
 | `via` | `workspace#admin` | refreshes the subject | narrows the containers whose arrow points at it, found through `rebac.edge` |
 | `set` | `group#member` | refreshes the member | narrows the member from what the set was granted |
 
-Grants to a subject set are mirrored in `rebac.set_grant`, so a membership's removal narrows at commit with SpiceDB
-down.
+Grants to a subject set, through a direct or a via relation, are mirrored in `rebac.set_grant`, so a membership's
+removal narrows at commit with SpiceDB down.
 
 The stored closure is checked against the live schema each time the daemon starts. A difference refuses the start
 until you accept it ([rebacd](/docs/rebacd/#the-schema-at-start)). `rebacd verify --closure` checks it on demand.
