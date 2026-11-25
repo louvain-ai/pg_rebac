@@ -69,16 +69,19 @@ fn subject(r: &str) -> Result<pb::SubjectReference, Status> {
 /// What a refused write means for its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// SpiceDB refuses THIS tuple and always will (INVALID_ARGUMENT): quarantine it, deliver the rest.
+    /// SpiceDB refuses THIS tuple and always will (`INVALID_ARGUMENT`): quarantine it, deliver the rest.
     Quarantine,
     /// The schema SpiceDB holds lacks the relation ("relation/permission `x` not found under definition `y`",
-    /// FAILED_PRECONDITION). Possibly permanent, possibly a schema that lags a deploy: the row is left undelivered and
+    /// `FAILED_PRECONDITION`). Possibly permanent, possibly a schema that lags a deploy: the row is left undelivered and
     /// tried again, never holding the rest, and quarantined only once it has failed for longer than the settle window.
     Defer,
     /// Anything else, including "object definition `x` not found" (a store with no schema yet): an outage.
     Outage,
 }
 
+/// How a refused write is treated (see `Refusal`). The `Defer` case is told by SpiceDB's message, as its code alone
+/// also covers a store with no schema at all.
+#[must_use]
 pub fn refusal(s: &Status) -> Refusal {
     match s.code() {
         Code::InvalidArgument => Refusal::Quarantine,
@@ -93,18 +96,23 @@ pub fn refusal(s: &Status) -> Refusal {
 }
 
 /// The whole request may contain a tuple SpiceDB refuses on its own: re-send it one row at a time.
+#[must_use]
 pub fn is_invalid(s: &Status) -> bool {
     refusal(s) != Refusal::Outage
 }
 
 /// A subject SpiceDB will not even parse: it contributes nothing to a lookup (fail closed for that identity, never
-/// for the principal). Only INVALID_ARGUMENT: a FAILED_PRECONDITION on a lookup (a store with no schema) is an
+/// for the principal). Only `INVALID_ARGUMENT`: a `FAILED_PRECONDITION` on a lookup (a store with no schema) is an
 /// outage, because reading it as "nothing" would project every principal empty.
+#[must_use]
 pub fn is_rejected_subject(s: &Status) -> bool {
     s.code() == Code::InvalidArgument
 }
 
 impl SpiceDb {
+    /// A client for `endpoint`. The channel connects lazily, on the first call; `async` is kept so connecting eagerly
+    /// later is not an API change.
+    #[allow(clippy::unused_async)]
     pub async fn connect(
         endpoint: &str,
         token: &str,
@@ -187,28 +195,30 @@ impl SpiceDb {
     }
 
     /// Write relationships, returning the token SpiceDB wrote them at.
-    pub async fn write(
+    pub async fn write<'a>(
         &self,
-        ops: &[TupleOp],
+        ops: impl IntoIterator<Item = &'a TupleOp>,
         deadline: Duration,
     ) -> Result<Option<String>, Status> {
-        let mut updates = Vec::with_capacity(ops.len());
-        for o in ops {
-            updates.push(pb::RelationshipUpdate {
-                operation: if o.touch {
-                    pb::relationship_update::Operation::Touch as i32
-                } else {
-                    pb::relationship_update::Operation::Delete as i32
-                },
-                relationship: Some(pb::Relationship {
-                    resource: Some(object(&o.resource)?),
-                    relation: o.relation.clone(),
-                    subject: Some(subject(&o.subject)?),
-                    optional_caveat: None,
-                    optional_expires_at: None,
-                }),
-            });
-        }
+        let updates = ops
+            .into_iter()
+            .map(|o| {
+                Ok(pb::RelationshipUpdate {
+                    operation: if o.touch {
+                        pb::relationship_update::Operation::Touch as i32
+                    } else {
+                        pb::relationship_update::Operation::Delete as i32
+                    },
+                    relationship: Some(pb::Relationship {
+                        resource: Some(object(&o.resource)?),
+                        relation: o.relation.clone(),
+                        subject: Some(subject(&o.subject)?),
+                        optional_caveat: None,
+                        optional_expires_at: None,
+                    }),
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
         let msg = pb::WriteRelationshipsRequest {
             updates,
             ..Default::default()
