@@ -16,12 +16,18 @@ curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm dem
 It starts Postgres with pgvector, SpiceDB (in memory) and the released `rebacd` image, installs the release's SQL
 (checked against its SHA-256), writes a small dataset's relationships through `rebac.write`, and waits for the daemon to
 relay them to SpiceDB and project two people. Then it runs one vector search as each of them (over three-number
-embeddings written by hand, so it needs no model). What you see, abridged:
+embeddings written by hand, so it needs no model), printing each statement before psql's result. What it prints once
+the daemon is ready:
 
 ```text
-1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:
+-- Each step below runs in its own session, which first sets its tenant:
+set rebac.tenant = 'acme';
 
-   as alice (reads handbook and payroll)
+-- 1. One vector search, fenced inside the query: the 5 nearest passages alice may read.
+select p.container, p.title
+from rebac.fenced_ids('alice', 'passage', '[1,0.05,0.2]'::vector, 5) f
+join passage p on p.id::text = f.id
+order by f.distance;
  container |       title
 -----------+-------------------
  handbook  | Annual pay review
@@ -29,8 +35,13 @@ embeddings written by hand, so it needs no model). What you see, abridged:
  handbook  | Pay days
  payroll   | Payroll cut-off
  payroll   | Overtime pay
+(5 rows)
 
-   as bob (reads handbook and deals)
+-- The same search as bob: different rows, still 5.
+select p.container, p.title
+from rebac.fenced_ids('bob', 'passage', '[1,0.05,0.2]'::vector, 5) f
+join passage p on p.id::text = f.id
+order by f.distance;
  container |       title
 -----------+--------------------
  handbook  | Annual pay review
@@ -38,23 +49,41 @@ embeddings written by hand, so it needs no model). What you see, abridged:
  deals     | Commission plan
  deals     | Reseller pay terms
  handbook  | Expenses
+(5 rows)
 
-2. Filtering AFTER retrieval instead: take the top 5 for everyone, then drop what bob may not read.
-   Passages bob cannot read (board) take 4 of the 5 places. bob asked for 5 rows and gets back:
- rows_left_for_bob
--------------------
-                 1
+-- 2. Filtering after retrieval instead: the top 5 for everyone, then drop what bob may not read.
+--    Board passages, which bob cannot read, took 4 of the 5 places.
+select p.container, p.title
+from (select container, title from passage
+      order by embedding <=> '[1,0.05,0.2]'::vector limit 5) p
+where p.container in (select * from rebac.readable_set('bob'));
+ container |       title
+-----------+-------------------
+ handbook  | Annual pay review
+(1 row)
 
-3. Revoke bob from deals. The revocation is in force when its transaction commits, before rebacd relays it:
-   bob, the same search again
+-- 3. Revoke bob from deals. The revocation is in force when this transaction commits,
+--    before rebacd has relayed it to SpiceDB.
+begin;
+select rebac.write('delete', 'container:acme/deals', 'member', 'user:acme/bob');
+commit;
+
+-- bob, the same search straight after the commit: no deals.
+select p.container, p.title
+from rebac.fenced_ids('bob', 'passage', '[1,0.05,0.2]'::vector, 5) f
+join passage p on p.id::text = f.id
+order by f.distance;
  container |       title
 -----------+-------------------
  handbook  | Annual pay review
  handbook  | Pay days
  handbook  | Expenses
+(3 rows)
 
-4. A principal nobody has asked about is an error (RB404), never an empty set:
-   mallory → RB404 "this principal has not been projected"
+-- 4. A principal nobody has asked about is an error, never an empty set.
+select * from rebac.readable_set('mallory');
+ERROR:  RB404: rebac: this principal has not been projected
+HINT:  ask the daemon (POST /lookup) to project it, then retry
 
 You just saw one vector search return different rows per person, fenced inside the query, and a revocation
 in force at commit. Stop it and forget everything:

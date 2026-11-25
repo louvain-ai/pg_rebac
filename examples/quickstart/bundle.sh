@@ -104,10 +104,10 @@ services:
       DB: postgres://postgres:quickstart@postgres/postgres
       PGOPTIONS: "-c client_min_messages=warning"
       QUICKSTART_DOWN: "curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v"
+      NO_COLOR: \${NO_COLOR:-}
     configs:
       - { source: demo.sh, target: /quickstart/demo.sh }
       - { source: seed.sql, target: /quickstart/seed.sql }
-      - { source: demo.sql, target: /quickstart/demo.sql }
     entrypoint: ["bash", "/quickstart/demo.sh"]
 
 volumes:
@@ -115,7 +115,7 @@ volumes:
 
 configs:
 EOF
-  for f in spicedb.yaml rebac.toml demo.sh seed.sql demo.sql; do
+  for f in spicedb.yaml rebac.toml demo.sh seed.sql; do
     printf '  %s:\n    content: |\n' "$f"
     inline "$f"
   done

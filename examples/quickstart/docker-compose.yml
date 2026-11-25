@@ -53,5 +53,6 @@ services:
       DB: postgres://postgres:quickstart@postgres/postgres
       QUICKSTART_DOWN: docker compose -f examples/quickstart/docker-compose.yml down -v
       PGOPTIONS: "-c client_min_messages=warning"
+      NO_COLOR: ${NO_COLOR:-}
     volumes: [".:/quickstart:ro"]
     entrypoint: ["bash", "/quickstart/demo.sh"]

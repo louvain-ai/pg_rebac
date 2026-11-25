@@ -67,10 +67,10 @@ services:
       DB: postgres://postgres:quickstart@postgres/postgres
       PGOPTIONS: "-c client_min_messages=warning"
       QUICKSTART_DOWN: "curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v"
+      NO_COLOR: ${NO_COLOR:-}
     configs:
       - { source: demo.sh, target: /quickstart/demo.sh }
       - { source: seed.sql, target: /quickstart/seed.sql }
-      - { source: demo.sql, target: /quickstart/demo.sql }
     entrypoint: ["bash", "/quickstart/demo.sh"]
 
 volumes:
@@ -101,7 +101,9 @@ configs:
   demo.sh:
     content: |
       #!/usr/bin/env bash
-      # Seed, wait until rebacd has relayed the relationships to SpiceDB and projected both people, then run the demo.
+      # Seed, wait until rebacd has relayed the relationships to SpiceDB and projected both people, then run the demo: one
+      # vector search as two people, what filtering after retrieval would have done instead, a revocation and an unknown
+      # principal. Each step prints the SQL it runs, then psql's result; the printed text is the string psql is given.
       set -euo pipefail
       q() { psql "$$DB" -v ON_ERROR_STOP=1 -qAt "$$@"; }
 
@@ -123,7 +125,90 @@ configs:
         exit 1
       fi
 
-      psql "$$DB" -v ON_ERROR_STOP=1 -q -P footer=off -f /quickstart/demo.sql
+      # Colour only on a terminal, and never with NO_COLOR set (https://no-color.org): comments dim, keywords bold, the
+      # rebac call in cyan.
+      if [ -t 1 ] && [ -z "$${NO_COLOR:-}" ]; then
+        show() {
+          sed -E -e $$'/^--/{s/.*/\e[2m&\e[0m/;b\n}' \
+            -e $$'s/\\b(select|from|join|on|where|in|order by|limit|set|begin|commit)\\b/\e[1m&\e[0m/g' \
+            -e $$'s/rebac\\.[a-z_]+\\([^)]*\\)/\e[1;36m&\e[0m/g'
+        }
+      else
+        show() { cat; }
+      fi
+
+      # Every step is its own session, and opens with the tenant it reads in.
+      tenant="set rebac.tenant = 'acme';"
+      # One step: print the SQL on stdin, then run that same string. Extra arguments go to psql.
+      step() {
+        local sql
+        sql="$$(cat)"
+        printf '%s\n' "$$sql" | show
+        psql "$$DB" -X -q -v ON_ERROR_STOP=1 -c "$$tenant" -c "$$sql" "$$@"
+      }
+
+      # The query "salary pay review", embedded in the seed's three dimensions (pay, sales, policy).
+      v="'[1,0.05,0.2]'::vector"
+      search() {
+        cat <<SQL
+      select p.container, p.title
+      from rebac.fenced_ids('$$1', 'passage', $$v, 5) f
+      join passage p on p.id::text = f.id
+      order by f.distance;
+      SQL
+      }
+
+      echo
+      printf '%s\n' "-- Each step below runs in its own session, which first sets its tenant:" "$$tenant" | show
+      echo
+      step <<SQL
+      -- 1. One vector search, fenced inside the query: the 5 nearest passages alice may read.
+      $$(search alice)
+      SQL
+      step <<SQL
+      -- The same search as bob: different rows, still 5.
+      $$(search bob)
+      SQL
+      step <<SQL
+      -- 2. Filtering after retrieval instead: the top 5 for everyone, then drop what bob may not read.
+      --    Board passages, which bob cannot read, took 4 of the 5 places.
+      select p.container, p.title
+      from (select container, title from passage
+            order by embedding <=> $$v limit 5) p
+      where p.container in (select * from rebac.readable_set('bob'));
+      SQL
+      # rebac.write returns the outbox sequence number it wrote, which says nothing here.
+      step -o /dev/null <<SQL
+      -- 3. Revoke bob from deals. The revocation is in force when this transaction commits,
+      --    before rebacd has relayed it to SpiceDB.
+      begin;
+      select rebac.write('delete', 'container:acme/deals', 'member', 'user:acme/bob');
+      commit;
+      SQL
+      echo
+      step <<SQL
+      -- bob, the same search straight after the commit: no deals.
+      $$(search bob)
+      SQL
+      # The error is the result: verbose names its SQLSTATE; the source location in pl_exec.c is left out.
+      if out="$$(step -v VERBOSITY=verbose -v SHOW_CONTEXT=never 2>&1 <<SQL
+      -- 4. A principal nobody has asked about is an error, never an empty set.
+      select * from rebac.readable_set('mallory');
+      SQL
+      )"; then
+        printf '%s\n' "$$out"
+        echo "mallory's read returned a set; it must be RB404" >&2
+        exit 1
+      fi
+      grep -v '^LOCATION:' <<< "$$out"
+      grep -q '^ERROR:  RB404:' <<< "$$out" || { echo "mallory's read failed, but not with RB404" >&2; exit 1; }
+
+      echo
+      echo 'You just saw one vector search return different rows per person, fenced inside the query, and a revocation'
+      echo 'in force at commit. Stop it and forget everything:'
+      # How this run is stopped: the served file and a clone's compose file each say (QUICKSTART_DOWN).
+      echo "  $$QUICKSTART_DOWN"
+      echo 'Docs: https://pgrebac.com/docs/getting-started/'
   seed.sql:
     content: |
       -- The sample dataset: one tenant (acme), four containers, seventeen passages, two people.
@@ -176,67 +261,3 @@ configs:
       select rebac.write('touch', 'container:acme/payroll',  'member', 'user:acme/alice');
       select rebac.write('touch', 'container:acme/deals',    'member', 'user:acme/bob');
       commit;
-  demo.sql:
-    content: |
-      -- The demo: one vector search, two people, what filtering after retrieval would have done instead, and a revocation.
-      \set QUIET on
-      \pset footer off
-      set rebac.tenant = 'acme';
-      -- The embedding of the query "salary pay review", in the seed's three dimensions (pay, sales, policy).
-      \set q '''[1, 0.05, 0.2]'''
-
-      \echo
-      \echo '1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:'
-      \echo
-      \echo '   as alice (reads handbook and payroll)'
-      -- rebac.fenced_ids picks the path for the reader's breadth: below exact_below_rows candidate rows (every reader
-      -- here) an exact sort, above it the fenced HNSW scan. Either way it returns k rows the reader may read, or raises.
-      select p.container, p.title
-      from rebac.fenced_ids('alice', 'passage', :q::vector, 5) f
-      join passage p on p.id::text = f.id
-      order by f.distance;
-
-      \echo '   as bob (reads handbook and deals)'
-      select p.container, p.title
-      from rebac.fenced_ids('bob', 'passage', :q::vector, 5) f
-      join passage p on p.id::text = f.id
-      order by f.distance;
-
-      \echo '2. Filtering AFTER retrieval instead: take the top 5 for everyone, then drop what bob may not read.'
-      \echo '   Passages bob cannot read (board) take 4 of the 5 places. bob asked for 5 rows and gets back:'
-      \echo
-      select count(*) as rows_left_for_bob
-      from (select p.container from passage p order by p.embedding <=> :q limit 5) top5
-      where top5.container in (select * from rebac.readable_set('bob'));
-
-      \echo '3. Revoke bob from deals. The revocation is in force when its transaction commits, before rebacd relays it:'
-      \echo
-      begin;
-      set local rebac.tenant = 'acme';
-      select rebac.write('delete', 'container:acme/deals', 'member', 'user:acme/bob') \g /dev/null
-      commit;
-      \echo '   bob, the same search again'
-      select p.container, p.title
-      from rebac.fenced_ids('bob', 'passage', :q::vector, 5) f
-      join passage p on p.id::text = f.id
-      order by f.distance;
-
-      \echo '4. A principal nobody has asked about is an error (RB404), never an empty set:'
-      \echo
-      -- The demo catches the error to print it as one line; an application sees it raised (SQLSTATE RB404).
-      do $$$$
-      begin
-        perform * from rebac.readable_set('mallory');
-        perform set_config('demo.mallory', 'returned a set (unexpected)', false);
-      exception when sqlstate 'RB404' then
-        perform set_config('demo.mallory', sqlstate || ' "' || replace(sqlerrm, 'rebac: ', '') || '"', false);
-      end $$$$;
-      select current_setting('demo.mallory') as mallory \gset
-      \echo '   mallory →' :mallory
-      \echo
-      \echo 'You just saw one vector search return different rows per person, fenced inside the query, and a revocation'
-      \echo 'in force at commit. Stop it and forget everything:'
-      -- How this run is stopped: the served file and a clone's compose file each say (QUICKSTART_DOWN).
-      \getenv down QUICKSTART_DOWN
-      \echo ' ' :down
-      \echo 'Docs: https://pgrebac.com/docs/getting-started/'

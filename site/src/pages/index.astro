@@ -142,39 +142,55 @@ const description =
         <p class="section-lede">
           With Docker (Compose 2.23 or later), and nothing to clone. It starts Postgres with pgvector, SpiceDB and <code>rebacd</code>, installs
           the released SQL, writes the relationships through <code>rebac.write</code>, and runs one vector search as two
-          people.
+          people, printing each statement before its result.
         </p>
         <div class="cmd block-cmd" data-copy={quickstart}>
           <pre class="code block" tabindex="0"><code><span class="prompt" aria-hidden="true">$ </span>{quickstartLines}</code></pre>
         </div>
         <p class="transcript-label">What it prints, abridged:</p>
-        <pre class="code block transcript" tabindex="0"><code><span class="c">1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:</span>
+        <pre class="code block transcript" tabindex="0"><code><span class="c">-- 1. One vector search, fenced inside the query: the 5 nearest passages alice may read.</span>
+<span class="k">select</span> p.container, p.title
+<span class="k">from</span> <mark><span class="f">rebac.fenced_ids</span>(<span class="s">'alice'</span>, <span class="s">'passage'</span>, <span class="s">'[1,0.05,0.2]'</span>::vector, 5)</mark> f
+<span class="k">join</span> passage p <span class="k">on</span> p.id::text = f.id
+<span class="k">order by</span> f.distance;
+ handbook  | Annual pay review
+ payroll   | Salary bands 2026
+ handbook  | Pay days
+ payroll   | Payroll cut-off
+ payroll   | Overtime pay
+(5 rows)
 
-   as alice (reads handbook and payroll)
-   handbook  | Annual pay review
-   payroll   | Salary bands 2026
-   handbook  | Pay days
-   payroll   | Payroll cut-off
-   payroll   | Overtime pay
+<span class="c">-- The same search as bob: different rows, still 5.</span>
+ handbook  | Annual pay review
+ handbook  | Pay days
+ deals     | Commission plan
+ deals     | Reseller pay terms
+ handbook  | Expenses
+(5 rows)
 
-   as bob (reads handbook and deals)
-   handbook  | Annual pay review
-   handbook  | Pay days
-   deals     | Commission plan
-   deals     | Reseller pay terms
-   handbook  | Expenses
+<span class="c">-- 2. Filtering after retrieval instead: the top 5 for everyone, then drop what bob may not read.</span>
+<span class="k">select</span> p.container, p.title
+<span class="k">from</span> (<span class="k">select</span> container, title <span class="k">from</span> passage
+      <span class="k">order by</span> embedding &lt;=&gt; <span class="s">'[1,0.05,0.2]'</span>::vector <span class="k">limit</span> 5) p
+<span class="k">where</span> p.container <span class="k">in</span> (<span class="k">select</span> * <span class="k">from</span> <span class="f">rebac.readable_set</span>(<span class="s">'bob'</span>));
+ handbook  | Annual pay review
+<mark>(1 row)</mark>                 <span class="c">-- board passages took 4 of the 5 places</span>
 
-<span class="c">2. Filtering AFTER retrieval instead: the top 5 for everyone, then drop what bob may not read.</span>
-   rows_left_for_bob: <mark>1</mark>          <span class="c">-- board passages took 4 of the 5 places</span>
+<span class="c">-- 3. Revoke bob from deals. In force when this transaction commits, before rebacd relays it.</span>
+<span class="k">begin</span>;
+<span class="k">select</span> <span class="f">rebac.write</span>(<span class="s">'delete'</span>, <span class="s">'container:acme/deals'</span>, <span class="s">'member'</span>, <span class="s">'user:acme/bob'</span>);
+<span class="k">commit</span>;
 
-<span class="c">3. Revoke bob from deals. In force when its transaction commits, before rebacd relays it:</span>
-   bob, the same search again
-   handbook  | Annual pay review
-   handbook  | Pay days
-   handbook  | Expenses
+<span class="c">-- bob, the same search straight after the commit: no deals.</span>
+ handbook  | Annual pay review
+ handbook  | Pay days
+ handbook  | Expenses
+(3 rows)
 
-<span class="c">4. A principal nobody has asked about is an error (RB404), never an empty set:</span>
-   mallory → RB404 "this principal has not been projected"
+<span class="c">-- 4. A principal nobody has asked about is an error, never an empty set.</span>
+<span class="k">select</span> * <span class="k">from</span> <span class="f">rebac.readable_set</span>(<span class="s">'mallory'</span>);
+ERROR:  RB404: rebac: this principal has not been projected
+HINT:  ask the daemon (POST /lookup) to project it, then retry
 
 <span class="c">You just saw one vector search return different rows per person, fenced inside the query,
 and a revocation in force at commit. Stop it and forget everything:</span>
