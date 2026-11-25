@@ -1,6 +1,6 @@
 //! A SpiceDB schema, parsed, and the CLOSURE of one permission: every relation whose tuples can change who holds it.
 //!
-//! pg_rebac projects one permission (say `container#view`) into Postgres. Two facts depend on knowing exactly which
+//! `pg_rebac` projects one permission (say `container#view`) into Postgres. Two facts depend on knowing exactly which
 //! relations feed it: a delivered grant on one of them must refresh a reader, and a delete on one must narrow one.
 //! A relation missed here is a grant that never shows up or, worse, a revocation that never narrows. So the list is
 //! derived from the schema, never typed by hand, and the derivation REFUSES every shape it cannot narrow soundly.
@@ -11,17 +11,16 @@
 //! - a relation on `R` whose allowed types are plain object types: `direct`;
 //! - an arrow `t->p` where `t` is a relation on `R` pointing back at `R`: a self-arrow (a file under its space);
 //! - an arrow `t->q` where `t` points at another type `W` and `q` is a union of plain relations on `W`: the arrow is
-//!   kind `arrow`, and each relation on `W` it reaches is kind `via`, reached `through` `t`.
-//!
+//!   kind `arrow`, and each relation on `W` it reaches is kind `via`, reached `through` `t`;
 //! - a direct relation may also accept a WILDCARD (`user:*`): a grant to every subject of that type, whose removal
 //!   narrows every holder of the container;
 //! - a direct or via relation may also accept a SUBJECT SET `T#r` (`group#member`), where `r` is a plain relation on
 //!   `T` whose allowed types are object types: `r` on `T` is kind `set` (its tuples are memberships).
 //!
-//! Refused, each with its reason: exclusion (`-`, adding a tuple can revoke), intersection (`&`, narrowing keeps what another
-//! granted relation holds), `.all()` (removing a tuple can grant), caveats,
-//! expiring relationships, a wildcard on a relation reached through an arrow, a subject set that is itself a permission or holds further subject
-//! sets (nested groups), and an arrow more than one hop away.
+//! Refused, each with its reason: exclusion (`-`, adding a tuple can revoke), intersection (`&`, narrowing keeps what
+//! another granted relation holds), `.all()` (removing a tuple can grant), caveats, expiring relationships, a wildcard
+//! on a relation reached through an arrow, a subject set that is itself a permission or holds further subject sets
+//! (nested groups), and an arrow more than one hop away.
 
 mod parse;
 
@@ -86,6 +85,8 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The name `rebac.view_relation.kind` stores.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Direct => "direct",
@@ -106,7 +107,7 @@ pub struct ViewRelation {
     pub through: Option<String>,
 }
 
-/// Why the closure was refused. The schema is not wrong; pg_rebac cannot narrow it soundly yet.
+/// Why the closure was refused. The schema is not wrong; `pg_rebac` cannot narrow it soundly yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     pub at: String,
@@ -146,7 +147,12 @@ impl fmt::Display for ClosureError {
 
 impl std::error::Error for ClosureError {}
 
-/// The relations that can change `resource_type#permission`, or every reason the shape is refused.
+/// The relations that can change `resource_type#permission`, sorted.
+///
+/// # Errors
+///
+/// `UnknownType` or `UnknownPermission` when the schema does not define them, and `Refused` with every reason
+/// when the permission's shape is one `pg_rebac` cannot narrow soundly.
 pub fn closure(
     schema: &Schema,
     resource_type: &str,
@@ -206,7 +212,8 @@ impl Walk<'_> {
         )) {
             return;
         }
-        let Some(def) = self.schema.definitions.get(ty) else {
+        let schema = self.schema;
+        let Some(def) = schema.definitions.get(ty) else {
             self.refuse(
                 format!("{ty}#{name}"),
                 "names a type the schema does not define",
@@ -216,8 +223,7 @@ impl Walk<'_> {
         if let Some(types) = def.relations.get(name) {
             self.relation(ty, name, types, through);
         } else if let Some(expr) = def.permissions.get(name) {
-            let expr = expr.clone();
-            self.expr(ty, name, &expr, through);
+            self.expr(ty, name, expr, through);
         } else {
             self.refuse(
                 format!("{ty}#{name}"),
@@ -270,12 +276,11 @@ impl Walk<'_> {
 
     /// `T#r` granted on a view relation: `r` must be a plain relation of object types on `T` (one level of groups).
     fn subject_set(&mut self, at: &str, ty: &str, rel: &str) {
-        let Some(types) = self
-            .schema
+        let schema = self.schema;
+        let Some(types) = schema
             .definitions
             .get(ty)
             .and_then(|d| d.relations.get(rel))
-            .cloned()
         else {
             self.refuse(
                 at.to_string(),
@@ -283,7 +288,7 @@ impl Walk<'_> {
             );
             return;
         };
-        for a in &types {
+        for a in types {
             if a.relation.is_some() || a.wildcard || a.caveat.is_some() || a.expiration {
                 self.refuse(
                     format!("{ty}#{rel}"),
@@ -352,17 +357,16 @@ impl Walk<'_> {
             );
             return;
         }
-        let Some(types) = self
-            .schema
+        let schema = self.schema;
+        let Some(types) = schema
             .definitions
             .get(ty)
             .and_then(|d| d.relations.get(tupleset))
-            .cloned()
         else {
             self.refuse(at, "an arrow's left side must be a relation");
             return;
         };
-        for a in &types {
+        for a in types {
             let target = &a.type_name;
             if a.relation.is_some() || a.wildcard || a.caveat.is_some() || a.expiration {
                 self.refuse(

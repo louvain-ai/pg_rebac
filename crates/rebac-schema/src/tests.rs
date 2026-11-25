@@ -2,7 +2,7 @@ use super::*;
 
 /// The shape the closure is built for: a projected type whose view is a union of direct relations, a self-arrow, and a
 /// relation reached through an arrow to another type. (Not any one product's schema; the generic shape.)
-const SHAPE: &str = r#"
+const SHAPE: &str = r"
 /** a person */
 definition user {}
 
@@ -26,7 +26,7 @@ definition derived {
   permission view = source.all(view)
   permission view_any = source->view
 }
-"#;
+";
 
 fn rel(t: &str, r: &str, k: Kind, target: Option<&str>, through: Option<&str>) -> ViewRelation {
     ViewRelation {
@@ -77,7 +77,7 @@ fn refused(schema: &str, needle: &str) {
             assert!(
                 r.iter().any(|x| x.reason.contains(needle)),
                 "expected a refusal mentioning {needle:?}, got {r:?}"
-            )
+            );
         }
         other => panic!("expected a refusal mentioning {needle:?}, got {other:?}"),
     }

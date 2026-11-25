@@ -28,15 +28,12 @@ enum Tok {
     Sym(&'static str),
 }
 
-struct Lexer {
-    toks: Vec<(Tok, usize)>,
-}
-
 const SYMS: [&str; 16] = [
     "->", "{", "}", "(", ")", ":", "|", "#", "*", "+", "&", "-", ".", ",", "=", ";",
 ];
 
-fn lex(src: &str) -> Result<Lexer, ParseError> {
+/// The tokens of `src`, each with its line.
+fn lex(src: &str) -> Result<Vec<(Tok, usize)>, ParseError> {
     let b = src.as_bytes();
     let (mut i, mut line, mut toks) = (0usize, 1usize, Vec::new());
     while i < b.len() {
@@ -92,7 +89,7 @@ fn lex(src: &str) -> Result<Lexer, ParseError> {
             });
         }
     }
-    Ok(Lexer { toks })
+    Ok(toks)
 }
 
 struct Parser {
@@ -105,8 +102,7 @@ impl Parser {
         self.toks
             .get(self.pos)
             .or(self.toks.last())
-            .map(|t| t.1)
-            .unwrap_or(1)
+            .map_or(1, |t| t.1)
     }
     fn err<T>(&self, m: impl Into<String>) -> Result<T, ParseError> {
         Err(ParseError {
@@ -137,12 +133,11 @@ impl Parser {
         }
     }
     fn ident(&mut self) -> Result<String, ParseError> {
-        match self.next() {
-            Some(Tok::Ident(s)) => Ok(s),
-            _ => {
-                self.pos -= 1;
-                self.err("expected a name")
-            }
+        if let Some(Tok::Ident(s)) = self.next() {
+            Ok(s)
+        } else {
+            self.pos -= 1;
+            self.err("expected a name")
         }
     }
     /// Skip a balanced `{ ... }` (a caveat body).
@@ -162,10 +157,13 @@ impl Parser {
 }
 
 /// Parse a SpiceDB schema.
+///
+/// # Errors
+///
+/// A `ParseError` naming the line of the first thing it cannot read.
 pub fn parse(src: &str) -> Result<Schema, ParseError> {
-    let lx = lex(src)?;
     let mut p = Parser {
-        toks: lx.toks,
+        toks: lex(src)?,
         pos: 0,
     };
     let mut schema = Schema::default();
@@ -192,13 +190,10 @@ pub fn parse(src: &str) -> Result<Schema, ParseError> {
             }
             "definition" => {
                 let d = definition(&mut p)?;
-                if schema
-                    .definitions
-                    .insert(d.name.clone(), d.clone())
-                    .is_some()
-                {
+                if schema.definitions.contains_key(&d.name) {
                     return p.err(format!("type `{}` is defined twice", d.name));
                 }
+                schema.definitions.insert(d.name.clone(), d);
             }
             other => return p.err(format!("unexpected `{other}` at the top level")),
         }
