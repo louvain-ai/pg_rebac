@@ -78,7 +78,8 @@ A release is one act: merging the release pull request.
   then `rebacd`); then npm (with provenance) and, beside it, the `ghcr.io/louvain-ai/rebacd` image (linux/amd64 and
   linux/arm64, with an SBOM and provenance, signed with cosign); then the Release's assets (the SQL, `SHA256SUMS`,
   the PGXN zip) and PGXN. Last, it runs the served quickstart against what it published and deploys pgrebac.com
-  from the tag's tree, so the site never shows unreleased docs. Every step skips what is already published, so a
+  from the tag's `site/`, so the site never shows unreleased docs, then fails unless pgrebac.com serves the home page,
+  the getting-started page and the tag's own `quickstart.yml`. Every step skips what is already published, so a
   failed run is fixed by running it again; an npm failure holds up nothing else.
 - **A dry run** builds and checks everything and publishes nothing:
   `gh workflow run publish.yml --ref vX.Y.Z -f tag=vX.Y.Z` (`dry-run` defaults to true).
