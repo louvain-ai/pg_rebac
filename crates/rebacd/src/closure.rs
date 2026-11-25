@@ -158,7 +158,9 @@ async fn rebuild_locked(ctx: &Ctx, rels: &[ViewRelation], why: &str) -> anyhow::
                 "delete from rebac.edge e where not exists (select 1 from rebac.view_relation v
                    where v.kind = 'arrow' and v.relation = e.relation and v.resource_type = rebac.setting('resource_type'));
                  delete from rebac.set_grant g where not exists (select 1 from rebac.view_relation v
-                   where v.kind = 'direct' and v.relation = g.relation and v.resource_type = rebac.setting('resource_type'));",
+                   where v.relation = g.relation
+                     and ((v.kind = 'direct' and v.resource_type = rebac.setting('resource_type') and strpos(g.container, ':') = 0)
+                          or (v.kind = 'via' and v.resource_type = split_part(g.container, ':', 1))));",
             )
             .await?;
         }

@@ -504,6 +504,27 @@ end $$;
 -- Projection writers (the daemon's entry points). Each takes the tenant explicitly; none clears another tenant.
 -- -------------------------------------------------------------------------------------------------------------------
 
+-- The containers a via relation's tuple reaches: those whose arrow (the via's `through`) points at its object.
+create or replace function rebac.via_children(t text, resource text, relation text) returns setof text
+language sql stable as $$
+  select e.child from rebac.view_relation v
+  join rebac.edge e on e.tenant = t and e.relation = v.through
+   and e.parent = rebac.obj_type(resource) || ':' || rebac.strip(t, rebac.obj_id(resource))
+  where v.kind = 'via' and v.resource_type = rebac.obj_type(resource) and v.relation = via_children.relation
+$$;
+
+-- The containers a mirrored grant to a subject set reaches: its container, or, for a grant through a via relation
+-- (its object typed, 'workspace:w1'), the containers whose arrow points at that object.
+create or replace function rebac.set_grant_containers(g rebac.set_grant) returns setof text
+language sql stable as $$
+  select g.container where strpos(g.container, ':') = 0
+  union
+  select e.child from rebac.view_relation v
+  join rebac.edge e on e.tenant = g.tenant and e.relation = v.through and e.parent = g.container
+  where strpos(g.container, ':') > 0 and v.kind = 'via' and v.relation = g.relation
+    and v.resource_type = split_part(g.container, ':', 1)
+$$;
+
 -- The containers a pending (undelivered) revocation names for this principal, which no projection may include:
 -- SpiceDB still holds the grant until the relay delivers the delete. Read BEFORE SpiceDB is asked; a delete delivered
 -- after this read is also absent from the lookup that follows.
@@ -538,12 +559,17 @@ language sql stable as $$
       on v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
      and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(d.subject, '#') > 0 or rebac.obj_id(d.subject) = '*')))
     union
+    -- a grant to a subject set through a via relation, likewise, for what it reaches
+    select c from deleted d cross join lateral rebac.via_children(t, d.resource, d.relation) c
+    where strpos(d.subject, '#') > 0
+    union
     -- a membership of a subject set: whatever the set was granted
-    select g.container
+    select c.container
     from deleted d join rebac.view_relation v
       on v.kind = 'set' and v.relation = d.relation and v.resource_type = rebac.obj_type(d.resource)
     join rebac.set_grant g on g.tenant = t
       and g.subject_set = rebac.obj_type(d.resource) || ':' || rebac.strip(t, rebac.obj_id(d.resource)) || '#' || d.relation
+    cross join lateral rebac.set_grant_containers(g) c(container)
     where d.subject in (select s from subj)
   ),
   closure as (  -- and everything under those through self-arrows (a space's shared files)
@@ -669,7 +695,18 @@ $$;
 create or replace function rebac.mirror(t text, op text, resource text, relation text, subject text) returns void
 language plpgsql volatile as $$
 begin
-  if op <> 'touch' or rebac.obj_type(resource) <> rebac.setting('resource_type') then return; end if;
+  if op <> 'touch' then return; end if;
+  -- A grant to a subject set through a VIA relation (workspace#admin@group:ops#member) is mirrored with its object
+  -- typed ('workspace:w1'), so a member's leaving narrows the containers under that object at commit.
+  if strpos(subject, '#') > 0 and rebac.obj_type(resource) <> rebac.setting('resource_type')
+     and exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
+                   and vr.relation = mirror.relation and vr.kind = 'via') then
+    insert into rebac.set_grant (tenant, container, relation, subject_set)
+    values (t, rebac.obj_type(resource) || ':' || rebac.strip(t, rebac.obj_id(resource)), mirror.relation,
+            rebac.set_ref(t, subject))
+    on conflict do nothing;
+  end if;
+  if rebac.obj_type(resource) <> rebac.setting('resource_type') then return; end if;
   if exists (select 1 from rebac.view_relation vr where vr.resource_type = rebac.obj_type(resource)
                and vr.relation = mirror.relation and vr.kind = 'arrow') then
     insert into rebac.edge (tenant, child, relation, parent)
@@ -764,7 +801,12 @@ begin
   from net d join rebac.view_relation v
     on v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
    and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(d.subject, '#') > 0 or rebac.obj_id(d.subject) = '*')))
-  where d.op = 'delete' and v.resource_type = root;
+  where d.op = 'delete' and v.resource_type = root
+  union
+  -- a grant to a subject set through a via relation names nobody either: every holder of what it reaches
+  select distinct d.tenant, c
+  from net d cross join lateral rebac.via_children(d.tenant, d.resource, d.relation) c
+  where d.op = 'delete' and strpos(d.subject, '#') > 0;
 
   perform set_config('lock_timeout', rebac.setting('narrow_lock_timeout_ms') || 'ms', true);
   if hold_tenants then
@@ -804,11 +846,12 @@ begin
       and e.parent = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource))
   ),
   membership as (  -- a member leaves a subject set: they lose what the set was granted
-    select d.tenant, d.subject, g.container
+    select d.tenant, d.subject, c.container
     from del d join rebac.view_relation v
       on v.kind = 'set' and v.resource_type = rebac.obj_type(d.resource) and v.relation = d.relation
     join rebac.set_grant g on g.tenant = d.tenant
       and g.subject_set = rebac.obj_type(d.resource) || ':' || rebac.strip(d.tenant, rebac.obj_id(d.resource)) || '#' || d.relation
+    cross join lateral rebac.set_grant_containers(g) c(container)
   )
   insert into rebac_narrow_pairs (tenant, principal, container)
   select x.tenant, p, rebac.strip(x.tenant, rebac.obj_id(x.resource))
@@ -853,7 +896,9 @@ begin
     order by resource, relation, subject, seq desc
   ) n
   where n.op = 'delete' and strpos(n.subject, '#') > 0 and g.tenant = n.tenant and g.relation = n.relation
-    and g.container = rebac.strip(n.tenant, rebac.obj_id(n.resource)) and g.subject_set = rebac.set_ref(n.tenant, n.subject);
+    and g.container = case when rebac.obj_type(n.resource) = root then rebac.strip(n.tenant, rebac.obj_id(n.resource))
+                           else rebac.obj_type(n.resource) || ':' || rebac.strip(n.tenant, rebac.obj_id(n.resource)) end
+    and g.subject_set = rebac.set_ref(n.tenant, n.subject);
 
   if not exists (select 1 from rebac_narrow_pairs) then return 0; end if;
 
@@ -1211,6 +1256,11 @@ begin
     on v.resource_type = rebac.obj_type(o.resource) and v.relation = o.relation
    and (v.kind = 'arrow' or (v.kind = 'direct' and (strpos(o.subject, '#') > 0 or rebac.obj_id(o.subject) = '*')))
   where o.seq = any(delivered)
+  union
+  -- a grant to a subject set through a via relation: each container it reaches
+  select distinct o.tenant, rebac.setting('resource_type') || ':' || rebac.prefix(o.tenant) || c, token, now(), 1
+  from rebac.outbox o cross join lateral rebac.via_children(o.tenant, o.resource, o.relation) c
+  where o.seq = any(delivered) and strpos(o.subject, '#') > 0
   on conflict (tenant, resource) do update
     set zedtoken = case when rebac.refresh_resource.zedtoken = '' or excluded.zedtoken = '' then ''
                         else excluded.zedtoken end,
