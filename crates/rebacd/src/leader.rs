@@ -110,10 +110,19 @@ pub fn is_leader(ctx: &Ctx) -> bool {
 /// The pid `rebac.assert_leader` checks: the lock connection's, or 0 (no check) with leader election off.
 #[must_use]
 pub fn fence_pid(ctx: &Ctx) -> i32 {
-    if ctx.config.leader_election {
-        ctx.leader_pid.load(Ordering::SeqCst).max(-1)
-    } else {
-        0
+    fence_pid_for(
+        ctx.config.leader_election,
+        ctx.leader_pid.load(Ordering::SeqCst),
+    )
+}
+
+/// 0 asks `rebac.assert_leader` for no check, so it is sent only with leader election off. A daemon that does not
+/// lead (`leader_pid` 0) sends -1, which no backend holds, so its fenced write is refused.
+fn fence_pid_for(leader_election: bool, leader_pid: i32) -> i32 {
+    match (leader_election, leader_pid) {
+        (false, _) => 0,
+        (true, 0) => -1,
+        (true, pid) => pid,
     }
 }
 
@@ -142,4 +151,17 @@ pub async fn fenced_execute(
     let n = tx.execute(sql, params).await?;
     tx.commit().await?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fence_pid_for;
+
+    #[test]
+    fn a_daemon_that_does_not_lead_is_fenced_out() {
+        assert_eq!(fence_pid_for(true, 0), -1, "0 would skip the check");
+        assert_eq!(fence_pid_for(true, 4242), 4242);
+        assert_eq!(fence_pid_for(false, 0), 0);
+        assert_eq!(fence_pid_for(false, 4242), 0);
+    }
 }
