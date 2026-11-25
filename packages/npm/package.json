@@ -14,18 +14,34 @@
     "./pg_rebac.sql": "./sql/pg_rebac.sql",
     "./package.json": "./package.json"
   },
-  "files": ["dist", "sql", "README.md"],
+  "files": [
+    "dist",
+    "sql",
+    "README.md"
+  ],
   "sideEffects": false,
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/louvain-ai/pg_rebac.git",
     "directory": "packages/npm"
   },
   "homepage": "https://pgrebac.com",
-  "bugs": { "url": "https://github.com/louvain-ai/pg_rebac/issues" },
-  "keywords": ["postgres", "spicedb", "authorization", "rebac", "permissions"],
-  "publishConfig": { "access": "public" },
+  "bugs": {
+    "url": "https://github.com/louvain-ai/pg_rebac/issues"
+  },
+  "keywords": [
+    "postgres",
+    "spicedb",
+    "authorization",
+    "rebac",
+    "permissions"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build:sql": "bash ../../scripts/release-sql.sh \"$npm_package_version\" sql/pg_rebac.sql",
     "build": "npm run build:sql && tsc -p tsconfig.json",

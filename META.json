@@ -31,7 +31,14 @@
       "type": "git"
     }
   },
-  "tags": ["rebac", "spicedb", "authorization", "permissions", "pgvector", "row level security"],
+  "tags": [
+    "rebac",
+    "spicedb",
+    "authorization",
+    "permissions",
+    "pgvector",
+    "row level security"
+  ],
   "meta-spec": {
     "version": "1.0.0",
     "url": "https://pgxn.org/meta/spec.txt"
