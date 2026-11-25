@@ -61,6 +61,11 @@ pub async fn deliver_isolating(ctx: &Ctx, rows: &[Row]) -> Result<Delivered, Sta
     Ok((token, refused, deferred))
 }
 
+/// An outage during a pass, with the `Status` kept in the chain so its log line names `grpc:<code>`.
+fn outage(e: Status) -> anyhow::Error {
+    anyhow::Error::new(e).context("spicedb unavailable during relay")
+}
+
 /// One pass. Returns how many rows it claimed; an outage is returned AFTER the transaction commits, so the narrowing
 /// done at claim stands and the row locks are released.
 pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
@@ -143,11 +148,7 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     }
     if let Some(e) = failure {
         tx.commit().await?;
-        anyhow::bail!(
-            "spicedb unavailable during relay: {:?} {}",
-            e.code(),
-            e.message()
-        );
+        return Err(outage(e));
     }
     let refused_seqs: HashSet<i64> = refused.iter().map(|(s, _)| *s).collect();
     let delivered: Vec<i64> = rows
@@ -177,4 +178,15 @@ pub async fn relay_once(ctx: &Ctx) -> anyhow::Result<usize> {
     tracing::debug!(claimed = rows.len(), narrowed, "relay pass");
     // A deferred row is not counted: a pass that settled nothing idles rather than spinning on it.
     Ok(rows.len() - deferred.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::outage;
+
+    #[test]
+    fn an_outage_logs_its_grpc_code() {
+        let e = outage(tonic::Status::unavailable("connection refused"));
+        assert_eq!(crate::logs::kind_of(&e), "grpc:Unavailable");
+    }
 }
