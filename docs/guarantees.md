@@ -1,0 +1,257 @@
+# What pg_rebac guarantees, and what it does not
+
+## Guarantees
+
+1. **G1, the fence precedes the read.** Every row a query fenced by `rebac.readable_set` returns lies in a container
+   that `rebac.readable` holds for one of the principal's holders, at the snapshot the query reads. A principal's
+   holders are the principal itself and the grant nodes it reads through (below). No row is returned unless
+   `rebac.checked` has passed for that query. (A query that is empty for another reason may return empty without
+   evaluating it.)
+
+   **Grant nodes** (`node_grants = on`, the default). A grant to a subject set (`container#member@group:eng#member`)
+   or a wildcard (`container#member@user:*`) is stored once, under its node, rather than once per member:
+   - A node is a holder whose name starts with `#`, such as `#group:eng#member` or `#user:*`. No principal may use a
+     name like that, and `rebac.checked` refuses one with `RB400`.
+   - Each node is looked up in SpiceDB with the node itself as the subject and projected like a principal, under the
+     same lock and its own cap (`max_containers_per_node`).
+   - A principal's memberships of subject sets come from SpiceDB in the principal's own refresh
+     (`rebac.node_member`). A wildcard node stands for every principal that has a subject of its type.
+   - A wildcard node is looked up as a stand-in subject (`wildcard_probe`), because SpiceDB cannot look up `user:*`.
+     The answer is intersected with the mirrored wildcard grants and what sits under them, so a grant made to the
+     stand-in itself widens nobody.
+
+   A node's set is what SpiceDB answers for the set itself as the subject. A member stands in every relationship that
+   names its set, so SpiceDB grants each member at least that set. A principal stores only what none of its nodes
+   holds. That subtraction saves space but nothing relies on it: a row kept both ways is
+   still narrowed by every revocation below.
+2. **G2, a revocation is in force at commit.** A view revocation written through `rebac.write` is absent from
+   the projection for every affected principal when the writing transaction commits, whether or not SpiceDB or the
+   daemon is up. That holds exactly for:
+   - direct relations;
+   - the relations reached through an arrow (`workspace->admin`);
+   - memberships of subject sets (the membership row goes, so nothing the node holds is read by that member, and
+     neither is the member's own copy of it);
+   - grants to subject sets, including those made through a via relation (`workspace#admin@group:ops#member`, mirrored
+     in `rebac.set_grant` with the object typed, `workspace:w1`; 0.1.0 to 0.2.0 did not narrow these at commit);
+   - wildcard grants on the projected type (`container#member@user:*`).
+
+   A removal narrows the node's rows and every member's own copies of them, together with what is under them through
+   self-arrows.
+   If a lock cannot be taken within `narrow_lock_timeout_ms`, the COMMIT fails; it never commits an unnarrowed
+   revocation.
+
+   Three kinds of removal narrow EVERYONE who holds a container: an arrow tuple (a file leaving its space), a grant to a
+   subject set and a wildcard grant. They name no principal, so the trigger holds the TENANT exclusively before it reads
+   who the holders are. Every projection writer (a refresh, a lazy first read, a retirement) holds its tenant shared,
+   then its principal, from before it asks SpiceDB until it commits. So a refresh in flight commits before the holders
+   are read (and its row is narrowed), and a refresh that starts later waits for the commit (and subtracts the
+   revocation as pending). A grant node is a principal in this order: its refresh takes its own lock, and a removal that
+   narrows it takes that lock. `tests/sql/09_revocation_race.sql` and `19_node_races.sql` drive both orders, for
+   principals, nodes and memberships. The cost: such a revocation waits for every refresh of its tenant in flight,
+   within `narrow_lock_timeout_ms`. The relay's own re-narrowing of the deletes it delivers takes no tenant lock, so a
+   relay waiting on SpiceDB never holds such a revocation up.
+
+   **G2's preconditions.** Each is checked or refused where it can be; the last is for an operator to watch.
+   - *READ COMMITTED* (the Postgres default). Under REPEATABLE READ or SERIALIZABLE the commit-time delete reads the
+     transaction's first snapshot, which cannot see a refresh that committed after it, so `rebac.write` refuses a
+     view revocation there with `RB422`. Grants are allowed at any isolation level.
+   - *TEMP on the database* for every role that writes relationships, and for `rebacd`'s: narrowing stages its work
+     in temporary tables. A hardening that revokes TEMP from PUBLIC (the CIS benchmark does) must grant it back to
+     those roles, or the commit fails; it never commits unnarrowed.
+   - *A tenant name without the tenant separator*: one with it is refused (`RB422`), since `<tenant><sep><id>` would
+     be ambiguous.
+   - *A revocation SpiceDB accepts.* A delete the relay quarantines (SpiceDB refused it) is narrowed at commit like any
+     other, but SpiceDB still holds the grant, so the next refresh restores it. `rebac.status().quarantined` above
+     zero is that alarm (see operations). A grant SpiceDB refused grants nothing: narrowing does not count it as
+     still held.
+
+   G2 for arrows, via relations and sets also needs `edge` and `set_grant` to be complete. Every such write must go
+   through `write`, be seen on Watch (G10), or the tenant must have been backfilled.
+3. **G3, no regrowth.** No refresh can restore a container whose revocation is pending in the outbox. No refresh can
+   restore anything for a retired principal.
+
+   "Pending" ends when the relay delivers the delete. A refresh looked up `at_least_as_fresh` an OLDER token after
+   that may, by SpiceDB's consistency rules, be served from a revision up to the revision quantization window
+   (5 s by default) before the delete. For a direct relation this heals within seconds: the delivery queues that
+   principal's refresh at the delete's token. An arrow tuple, a grant to a subject set or a wildcard names nobody, so
+   its narrowing records whom it narrowed on the outbox row (`narrowed`, and `narrowed_containers` for what grant
+   nodes lost). Its delivery re-projects them at the delete's token, so a container regrown this way heals the same
+   way. This is reasoned from SpiceDB's documented semantics, not observed.
+   `consistency = "fully_consistent"` closes it.
+4. **G4, at least as fresh.** A refresh queued by a delivery is looked up at `at_least_as_fresh` the token SpiceDB
+   wrote that delivery at. A first read, and anything with no token, is looked up fully consistent.
+5. **G5, tenant isolation.** Every key carries the tenant. A tuple whose ids carry another tenant's prefix is refused
+   by `rebac.write`, maps to nobody, and is dropped from a lookup. A wildcard subject (`user:*`) carries no tenant:
+   SpiceDB grants it to every `user`, in every tenant, but the resource still carries its tenant, so only that
+   tenant's principals can project it (a lookup drops another tenant's ids).
+6. **G6, fail closed.**
+   - An unknown principal is `RB404`.
+   - A missing tenant is `RB400`.
+   - A daemon that is not live, a set older than the freshness bound or of unknown age, an unavailable lookup and an
+     over-cap set are each `RB503`. So is a principal reading through a grant node that is unavailable, over its
+     cap or stale.
+   - A node name read as a principal is `RB400`.
+   - None of these is an empty set, or a wider one.
+
+7. **G7, freshness.** A principal's set is read only while the SpiceDB lookup behind it began within
+   `max_projection_age_ms` (one hour by default) of the read; a set with no lookup time is never read. With grant
+   nodes, the lookup behind a set is the oldest of the principal's own and those of its nodes. The Watch gap, the
+   Watch grace and the closure's last change are checked against that same oldest lookup. The lookup time
+   is taken from the database's clock just before SpiceDB is asked. A lookup made `fully_consistent` reflects every
+   relationship SpiceDB held at that instant. One made `at_least_as_fresh` a token may be served from a revision up
+   to SpiceDB's revision quantization older (`--datastore-revision-quantization-interval`, 5 s by default). Narrowing
+   only removes rows and never moves the time.
+
+   With `watch = false`, G7 is the bound for what reaches SpiceDB WITHOUT `rebac.write` (another service, the `zed`
+   CLI): those changes are picked up only by a re-projection, and the daemon's sweep re-projects everyone every
+   `sweep_interval_ms` (15 minutes by default), so keep the bound above the sweep interval plus the time a sweep takes
+   to drain. With Watch on (the default), G10 bounds them instead. Revocations through `rebac.write` never wait on
+   either (G2).
+
+   **Liveness is separate.** `max_staleness_ms` (5 s) fails reads closed when the daemon has not heartbeated. A beat
+   proves only that the daemon is running and can reach SpiceDB and Postgres. It says nothing about how current any
+   set is.
+
+   **On upgrade**, rows written before `looked_up_at` existed have no lookup time. They read as `RB503` until the sweep
+   re-projects them (or `POST /lookup` re-projects one). `rebac.status()` counts them as `unfresh_principals`.
+
+8. **G8, the closure matches the live schema.** The daemon re-derives the closure whenever SpiceDB's schema text
+   changes: on Watch's notice, and by re-reading it every `closure_check_ms` (10 s). A change to what grants view
+   marks `rebac.closure_state` invalid in the same transaction that stores the new list, so every read is `RB503`
+   until every tenant's relationships are re-read into the mirrors. After that, a principal looked up before the
+   change (or of unknown lookup time) stays `RB503` until it is re-projected. An unsupported or unparseable schema
+   keeps every read `RB503`. A daemon in shadow mode never changes the live closure state. Between a
+   schema write in SpiceDB and the daemon noticing it (up to `closure_check_ms`, or the next start), reads run on the
+   old closure; that window is the one this guarantee does not close.
+
+9. **G9, RLS cannot be widened.** The policy `rebac.enable_rls` generates is `RESTRICTIVE`, so it is ANDed with every
+   other policy on the table. With `principal_source => 'session'`, a role without `EXECUTE` on
+   `rebac.set_principal` cannot choose the principal, and needs no access to the projection itself.
+
+10. **G10, a revocation made outside `rebac.write` is in force within Watch's delivery, or reads fail closed.** With
+    `watch = true` (the default, live mode), the daemon follows SpiceDB's Watch over every type and
+    applies each message in ONE transaction that also records the stream's position (`rebac.apply_watch`):
+    - A DELETE of a closure relation that did not come through `rebac.write` is narrowed as G2 narrows a commit: the
+      same function (`narrow_seqs`), the same lock order (the tenant exclusively for an arrow tuple or a grant to a
+      subject set, then each principal), the same `narrow_lock_timeout_ms`. That covers direct relations, arrows, via
+      relations, memberships of subject sets and grants to them, with everything under a lost container through
+      self-arrows. A TOUCH carrying a caveat or an expiry is applied as a removal (the closure refuses both, so only a
+      schema change the daemon has not yet re-checked could produce one; G8). No other TOUCH can narrow a union.
+    - A TOUCH is a grant, and stays lazy: it is mirrored into `edge` and `set_grant` (so a later revocation through
+      either path finds it) and queues a refresh.
+    - Every principal narrowed, and every principal or resource the change names, is refreshed FULLY CONSISTENT. A
+      refresh claimed earlier at an older token re-reads its queue row under the principal's lock and looks up fully
+      consistent too, so no refresh can be served from a revision before the change (the window G3 leaves for
+      relayed deletes does not apply here).
+    - The daemon's own relayed writes are recognised and skipped: the same operation on the same relationship is in
+      the outbox either undelivered or delivered at the very token Watch reports.
+
+    **The bound.** While the stream is connected, a revocation made directly in SpiceDB leaves the projection within
+    the time SpiceDB's Watch takes to deliver it plus one `apply_watch` transaction. (Measured once in the integration
+    test, SpiceDB in memory on the same host: 26 to 70 ms over three runs, from the WriteRelationships reply to the
+    row being gone.
+    pg_rebac does not bound SpiceDB's delivery itself.) Otherwise reads fail closed:
+    - **The stream is down, or a message cannot be applied** (a lock not taken within `narrow_lock_timeout_ms`): the
+      stream is not current, and reads are judged per principal (`rebac.watch_ok`, called by `rebac.checked`). A
+      set is exact as of the later of its own lookup and the last time the stream was current (`current_at`, moved
+      only by a caught-up stream, and dated to when the head was read). It is read while that is within
+      `watch_grace_ms` (5 s; 0 turns the check off), and is `RB503` (`rebac_watch`) after. So the principals looked
+      up since the stream was last current keep reading, everyone else fails closed after the grace, and
+      `POST /lookup` (fully consistent) re-projects any one at once. A refresh looked up `at_least_as_fresh` may be
+      served up to SpiceDB's revision quantization (5 s) older than its lookup time, so the bound for such a set is
+      the grace plus the quantization; `consistency = "fully_consistent"` makes it the grace. The heartbeat no longer
+      requires the stream: it is liveness only. A connection that died silently is ended by HTTP/2 keepalive
+      within 10 s, during which the stream still counts as current. The message is retried from the same position;
+      nothing is half-applied.
+    - **On reconnect** the stream resumes from the position applied through, and reads stay closed until the whole
+      replay is applied. Before opening, the daemon reads SpiceDB's head revision with a fully consistent
+      CheckPermission whose answer it ignores; the stream counts as current once a delivered position reaches that
+      revision. Watch delivers in revision order, so by then everything committed before the reopen is applied. A
+      stored position already at the head (an idle store, which may send a resumed stream nothing at all) is current
+      at once. The daemon watches every type, so a revision past the position carries a change or a checkpoint the
+      stream delivers; on the Postgres datastore that is its idle checkpoint, about every 5 s, which bounds how long
+      such a reconnect stays closed. A position not reached within six times `deadline_ms` reopens the stream.
+      Revisions are compared as decimals (the in-memory datastore) or as Postgres snapshots (a position covers the
+      head once its `xmin` reaches the head's `xmax`); both shapes were read from SpiceDB 1.56's own tokens. MySQL,
+      CockroachDB and Spanner write decimal revisions too, but were not run. A revision the daemon cannot read keeps
+      reads closed and says to set `watch_marker = true`, which waits instead for a marker relationship it touches
+      (`<resource_type>:__rebac_watch_marker`, no tenant prefix, so it grants nobody, and dropped before
+      `rebac.apply_watch`).
+    - **A position that cannot be resumed**: none stored (a first start, or the first start after upgrading from
+      0.1, whose observe-only position applied nothing), one SpiceDB refuses (`INVALID_ARGUMENT`, `OUT_OF_RANGE`,
+      `FAILED_PRECONDITION`, `NOT_FOUND`), or one whose last confirmation is older than `watch_resume_max_age_ms`
+      (one hour). The age check exists because SpiceDB may resume from a revision past its garbage-collection window
+      without an error and silently skip what it collected (observed with the in-memory datastore and a 2 s window).
+      The daemon reads the head revision, records `gap_at` there and resumes from it: every principal looked up
+      before is `RB503` until re-projected, the sweep is forced at once to do that (`POST /lookup` re-projects one
+      sooner), and every refresh already queued is re-queued fully consistent.
+
+    **With several daemons** on one database, one leads: it holds a session advisory lock (`1919050596, 1`; a shadow
+    daemon's is `1919050596, 2`) on a connection of its own, and only it runs Watch, the closure check and the sweep.
+    Every daemon relays, refreshes and serves `POST /lookup`. Every Watch write runs in a transaction that first calls
+    `rebac.assert_leader` with the lock connection's backend pid: it locks the applied position's row and raises
+    unless that backend still holds the lock, so a daemon whose lock connection died cannot commit another Watch
+    write, even before it notices. When the leader stops, another daemon takes the lock within `leader_retry_ms`
+    (2 s). When its host or network dies instead, Postgres releases the lock once its TCP keepalives give up on the
+    session; the lock session sets them to 10 s idle, 5 s interval and 3 probes, so about 25 s.
+    `leader_election = false` runs everything in every daemon, for a single daemon.
+
+    A store that cannot serve Watch fails closed with Watch on, once the grace has passed: set `watch = false` there,
+    and G7's sweep bound applies instead. In shadow mode Watch only counts, under its own position (`watch_shadow`), so
+    a shadow daemon never moves the live one's.
+
+## Not guaranteed
+
+- **RLS policies made by an earlier version stay permissive** until `rebac.enable_rls` is run again on the table.
+- **The session binding holds only for a role that logs in as itself.** A session whose login role is trusted can
+  `RESET ROLE` after a `SET ROLE` and bind any principal; SQL you do not trust must connect as the untrusted role.
+- **The principal setting is trusted input.** With the default `principal_source => 'setting'`, and for any direct
+  call of `rebac.readable_set(p)`, whoever can run SQL chooses the principal. Use that form only for an application
+  role that sets it after authenticating the person.
+
+- **Grants are eventually consistent.** A grant shows up after relay delivery and a refresh. Until then a reader is
+  briefly narrower, which is the one direction a fence may err.
+- **Writes not made through `rebac.write`** (another service, the `zed` CLI) are not in force at any commit of
+  yours: G10 bounds them by Watch's delivery, or, with `watch = false`, G7 by the sweep. G2 does not cover them.
+- **The "still held" rule** reads the outbox's net state (quarantined rows excluded), so it is exact only when every
+  view relation is written through `rebac.write` or seen on Watch. Where it is not exact it narrows too much, never too
+  little, and the refresh that follows restores the rest.
+- **Caveats, expiring relationships and exclusion** are refused at start, not evaluated.
+- **A role that writes relationships is trusted with them.** It needs write access to the outbox, so it can also
+  undo its own revocation's narrowing (by setting `rebac._narrowed_upto`, or by editing `rebac.outbox` or
+  `rebac.readable`). G2 protects readers from a writer's mistakes, not from a writer acting against its own writes.
+- **Advisory locks are shared.** Narrowing and refreshes take transaction-level advisory locks in the spaces
+  `1919050595` (tenants) and the principal key; a session that holds such a lock and never releases it makes those
+  revocations fail their commit after `narrow_lock_timeout_ms`, and those refreshes wait. Do not use those keys for
+  anything else, and do not give untrusted SQL `pg_advisory_lock`.
+- **A read replica** holds G2 only once its replay has passed the commit.
+- **Projection rows written by anything but `rebac.project`** (an application's own mirror into `rebac.readable`) do
+  not take the lock order, so G2's race argument does not cover them. Such a mirror must not write a holder whose
+  name starts with `#`, because members read that holder's rows as a grant node's.
+- **Grant nodes save storage and grant fan-out, not lookups.** A principal's refresh still asks SpiceDB for its whole
+  readable set (SpiceDB does not say through which path a container is held), plus one membership lookup per
+  subject-set relation. A sweep therefore costs SpiceDB at least what it did in 0.2. `docs/design/projection-scale.md`
+  has the measurements.
+- **Upgrading from 0.2** keeps 0.2's expanded rows, which read correctly. rebacd 0.3 re-reads every tenant's
+  relationships once at its first start (`remirror_pending`) to mirror what 0.2 did not, grants to sets through a via
+  relation and wildcard grants; until it has, leaving such a set waits for a refresh, as in 0.2. A grant
+  to a set reaches such a principal only once it is re-projected. The first install of 0.3 forces a sweep to do that.
+
+## Design decisions
+
+- **Grant nodes live in the same table as principals' rows.** The fence then reads one table through one index
+  (`principal = ANY(holders) AND container = c`), so a fenced HNSW scan keeps the plan of 0.2: the HNSW index
+  outside and one index probe per candidate inside. A two-table union was measured first. It lost that shape: the
+  planner chose a hash join over a sequential scan at 5% to 30% breadth.
+
+- **The planner-shaped primitive is the set, not the boolean.** Postgres never inlines a scalar SQL function whose
+  body has a sub-select, so `readable_by(p, c)` written as `exists (...)` is a per-row function call. Measured with
+  `EXPLAIN (VERBOSE)`, `container in (select * from rebac.readable_set(p))` is inlined into a semi-join.
+  `readable_by` remains, as a per-row check.
+- **The principal's check is a pseudo-constant qual.** It is evaluated once, in a gating filter. The principal is
+  compared as the caller's own value, so the planner sees its statistics.
+- **Liveness fails closed by default** (5 s), and so does freshness (one hour): an answer the daemon cannot vouch for
+  is an error, never a quietly older set. Revocations through the outbox never wait on either.
+- **Consistency is `at_least_as_fresh`** by default, so a refresh costs SpiceDB a cached read where it can;
+  `fully_consistent` is a setting, and closes G3's window.
+- **Subject sets one level deep are supported**, because group grants are the common shape of company permissions.

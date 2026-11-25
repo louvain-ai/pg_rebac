@@ -1,0 +1,12 @@
+---
+import LouvainMark from "./LouvainMark.astro";
+---
+<p class="made-by">
+  <a href="https://louvain.ai"><LouvainMark size={16} /><span>Built and maintained by Louvain</span></a>
+</p>
+<style>
+  .made-by { margin: 0; font-size: 0.875rem; }
+  .made-by a { display: inline-flex; align-items: center; gap: 0.5em; color: inherit; text-decoration: none; }
+  .made-by a:hover span { text-decoration: underline; text-underline-offset: 0.18em; }
+  .made-by :global(.louvain-mark) { color: var(--louvain-mark, #535bd5); flex: none; }
+</style>

@@ -1,0 +1,22 @@
+# The test stack: Postgres with pgvector, and SpiceDB in memory. Loopback only; the key guards nothing.
+#   docker compose up -d --wait
+#   REBAC_IT=1 cargo test -p rebacd --test integration
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_PASSWORD: rebac
+    ports: ["127.0.0.1:55433:5432"]
+    command: ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "max_connections=200"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 1s
+      retries: 30
+  spicedb:
+    image: authzed/spicedb:v1.56.2
+    command: ["serve", "--grpc-preshared-key", "rebac-test-key", "--datastore-engine", "memory"]
+    ports: ["127.0.0.1:50061:50051"]
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 1s
+      retries: 30

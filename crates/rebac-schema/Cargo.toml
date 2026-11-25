@@ -1,0 +1,15 @@
+[package]
+name = "rebac-schema"
+description = "Parses a SpiceDB schema and derives which relations can change one permission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["spicedb", "schema", "authorization", "rebac", "parser"]
+categories = ["parser-implementations", "authentication"]
+rust-version.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,200 @@
+# The checks every push to main and every pull request runs. Kept small on purpose: one Rust job, the SQL suite on each
+# supported Postgres, and the daemon against a real SpiceDB.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: cargo test and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      # PGXS sets VERSION to the Postgres version, so the Makefile must not use it: build the distribution with a
+      # real pg_config in play and check it is named after META.json.
+      - name: make dist names the release, not the Postgres version
+        run: |
+          pg_config="$(ls /usr/lib/postgresql/*/bin/pg_config | tail -1)"
+          want="$(jq -r .version META.json)"
+          make dist PG_CONFIG="$pg_config"
+          test -f "dist/pg_rebac-$want.zip" && test -f "dist/pg_rebac--$want.sql"
+
+  msrv:
+    name: builds on the minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The workspace's rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --locked --workspace --all-targets
+
+  site:
+    name: the site builds
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run build
+
+  sql:
+    name: SQL suite, Postgres ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: rebac
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 1s --health-timeout 5s --health-retries 30
+    env:
+      REBAC_TEST_URL: postgres://postgres:rebac@127.0.0.1:55433
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: tests/sql/run.sh
+      # Hosted Postgres installs as a database owner that is not a superuser: that must work, with and without pgvector
+      # (install_as_owner.sh), and the whole suite must pass as that role (a superuser only creates the extensions).
+      - run: tests/sql/install_as_owner.sh
+      - name: SQL suite as a non-superuser owner
+        run: REBAC_TEST_AS_OWNER=1 tests/sql/run.sh
+      # The revocation races, repeated: two sessions (dblink) race a refresh against a revocation in both orders, and
+      # a held lock fails the commit (fault injection); 13 races one against a revocation applied from Watch, 19 a grant
+      # node's and a member's refresh against set-grant and membership revocations. Deterministic by construction;
+      # repeated to catch a regression that only loses sometimes.
+      - name: revocation vs refresh races, 20 rounds
+        run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' && tests/sql/run.sh '1[39]_*' || exit 1; done
+      # The upgrade from the last release: its SQL, projected as it did, then this commit's applied twice.
+      - name: upgrade from 0.2.0 and from 0.2.1
+        run: tests/upgrade/run.sh 0.2.0 && tests/upgrade/run.sh 0.2.1
+
+  # Through a pooler: PgBouncer in transaction mode with one server connection, so every client shares a backend. A
+  # session SET leaks and SET LOCAL does not; a fenced read, a revocation at commit and set_principal work through it.
+  pooler:
+    name: through PgBouncer, transaction mode
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: rebac
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 1s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: REBAC_TEST_URL=postgres://postgres:rebac@127.0.0.1:55433 tests/pooler/run.sh
+
+  integration:
+    name: rebacd against SpiceDB
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: rebac
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 1s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A service container cannot be given `serve` and its flags, so SpiceDB is started here (the compose file's).
+      - name: SpiceDB
+        run: |
+          docker run -d --name spicedb -p 50061:50051 authzed/spicedb:v1.56.2 \
+            serve --grpc-preshared-key rebac-test-key --datastore-engine memory
+          for i in $(seq 60); do
+            docker exec spicedb grpc_health_probe -addr=:50051 >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          docker logs spicedb; exit 1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: REBAC_IT=1 cargo test --locked -p rebacd --test integration
+      # SpiceDB over TLS: a throwaway CA, a certificate for localhost, and the daemon's client verifying it.
+      - name: rebacd to SpiceDB over TLS
+        run: |
+          d="$(mktemp -d)"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=rebac test CA" -keyout "$d/ca.key" -out "$d/ca.pem"
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout "$d/server.key" -out "$d/server.csr"
+          printf 'subjectAltName=DNS:localhost\n' > "$d/ext.cnf"
+          openssl x509 -req -in "$d/server.csr" -CA "$d/ca.pem" -CAkey "$d/ca.key" -CAcreateserial -days 1 \
+            -extfile "$d/ext.cnf" -out "$d/server.crt"
+          chmod 755 "$d" && chmod 644 "$d/server.key"
+          docker run -d --name spicedb-tls -p 50071:50051 -v "$d:/certs:ro" authzed/spicedb:v1.56.2 \
+            serve --grpc-preshared-key rebac-test-key --datastore-engine memory \
+            --grpc-tls-cert-path /certs/server.crt --grpc-tls-key-path /certs/server.key
+          for i in $(seq 60); do
+            docker exec spicedb-tls grpc_health_probe -addr=:50051 -tls -tls-no-verify >/dev/null 2>&1 && break
+            sleep 1
+          done
+          REBAC_TLS_IT=1 REBAC_SPICEDB_TLS_URL=https://localhost:50071 REBAC_SPICEDB_TLS_CA="$d/ca.pem" \
+            cargo test --locked -p rebacd --test tls spicedb_over_tls
+      # SpiceDB as the oracle: randomised schemas and relationships, every principal's set compared with
+      # LookupResources at each revocation's commit and after the queues drain (8 rounds; REBAC_ORACLE_ROUNDS for more).
+      - run: REBAC_IT=1 cargo test --locked -p rebacd --test oracle
+
+  # The quickstart, both ways: the one-file demo pgrebac.com serves (released image and SQL), which must be what
+  # examples/quickstart/ would generate, and the from-clone demo with rebacd built from this commit. Each must show bob
+  # one row of five after retrieval and the revocation in force at commit.
+  quickstart:
+    name: quickstart, served and from a clone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: examples/quickstart/bundle.sh --check
+      # A release pull request bundles the version it is about to publish; until publish.yml has run, there is
+      # nothing to serve, and publish.yml runs this same check against what it published.
+      - name: The served file, piped as a reader runs it
+        run: |
+          version="$(sed -n 's/^# pg_rebac version: //p' site/public/quickstart.yml)"
+          curl -fsIL -o /dev/null "https://github.com/louvain-ai/pg_rebac/releases/download/v$version/pg_rebac--$version.sql" ||
+            { echo "::notice::pg_rebac $version is not published yet; publish.yml checks the served file once it is"; exit 0; }
+          cd "$(mktemp -d)"
+          docker compose -f - run --rm demo < "$GITHUB_WORKSPACE/site/public/quickstart.yml" 2>&1 | tee out
+          "$GITHUB_WORKSPACE/examples/quickstart/check-output.sh" out
+          docker compose -f - down -v < "$GITHUB_WORKSPACE/site/public/quickstart.yml"
+      - name: From a clone
+        run: |
+          docker compose -f examples/quickstart/docker-compose.yml run --rm demo 2>&1 | tee out
+          examples/quickstart/check-output.sh out
+      - name: rebacd's log, on failure
+        if: failure()
+        run: docker compose -f examples/quickstart/docker-compose.yml logs rebacd | tail -100

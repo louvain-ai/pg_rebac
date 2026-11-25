@@ -1,0 +1,69 @@
+{
+  "layout": "v02",
+  "principals": 10000,
+  "load_s": 86,
+  "readable_rows": 11267769,
+  "node_rows": 0,
+  "member_rows": 0,
+  "readable_bytes": 2697445376,
+  "node_member_bytes": 0,
+  "principal_state_bytes": 2433024,
+  "total_bytes": 2699878400,
+  "queries": {
+    "typical": {
+      "ann": {
+        "p50_ms": 22.17,
+        "p95_ms": 38.04,
+        "mean_ms": 25.63,
+        "n": 300,
+        "recall": 1.0,
+        "hnsw_outer": false
+      },
+      "exact": {
+        "p50_ms": 16.96,
+        "p95_ms": 27.18,
+        "mean_ms": 18.69,
+        "n": 300
+      },
+      "fenced_ids": {
+        "p50_ms": 15.68,
+        "p95_ms": 21.32,
+        "mean_ms": 16.26,
+        "n": 300,
+        "recall": 1.0,
+        "path": "exact"
+      },
+      "breadth": 1125
+    },
+    "broad": {
+      "ann": {
+        "p50_ms": 3.25,
+        "p95_ms": 35.84,
+        "mean_ms": 8.47,
+        "n": 300,
+        "recall": 1.0,
+        "hnsw_outer": true
+      },
+      "exact": {
+        "p50_ms": 167.82,
+        "p95_ms": 255.76,
+        "mean_ms": 181.98,
+        "n": 300
+      },
+      "fenced_ids": {
+        "p50_ms": 22.62,
+        "p95_ms": 29.84,
+        "mean_ms": 24.05,
+        "n": 300,
+        "recall": 1.0,
+        "path": "ann"
+      },
+      "breadth": 21124
+    }
+  },
+  "sweep_db": {
+    "project_p50_ms": 11.48,
+    "project_p95_ms": 15.29,
+    "project_mean_ms": 12.74
+  }
+}

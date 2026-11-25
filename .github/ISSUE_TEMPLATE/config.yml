@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/louvain-ai/pg_rebac/security/advisories/new
+    about: Report it privately, never in a public issue (see SECURITY.md).
+  - name: Read the docs
+    url: https://pgrebac.com/docs/getting-started/
+    about: Getting started, the readable set, consistency, operations and the FAQ.

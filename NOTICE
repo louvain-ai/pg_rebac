@@ -1,0 +1,8 @@
+pg_rebac
+Copyright 2026 The pg_rebac Authors
+
+This product includes software developed by The pg_rebac Authors, licensed under the Apache License, Version 2.0.
+
+The vendored SpiceDB API protos (crates/rebacd/proto/authzed) are Copyright Authzed, Inc., licensed under the Apache
+License, Version 2.0. crates/rebacd/proto/google/rpc/status.proto is Copyright Google LLC, licensed under the Apache
+License, Version 2.0.

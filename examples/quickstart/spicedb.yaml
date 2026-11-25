@@ -1,0 +1,14 @@
+# The SpiceDB schema the quickstart's daemon derives its closure from. Loaded at start into an in-memory datastore.
+# Relationships are not here: the seed writes them through rebac.write, as an application would.
+schema: |-
+  definition user {}
+
+  definition group {
+    relation member: user
+  }
+
+  definition container {
+    relation member: user | group#member
+    permission view = member
+  }
+relationships: ""

@@ -1,0 +1,66 @@
+# Keeps the release pull request up to date with main (or a maintenance branch, release-X.Y): every version bumped
+# and, once that branch's commits warrant a release, the CHANGELOG written from them. Merging it is the release:
+# release-please tags it, creates the GitHub Release and hands the tag to publish.yml.
+name: release-please
+
+on:
+  push:
+    branches: [main, "release-[0-9]+.[0-9]+"]
+
+concurrency:
+  group: release-please-${{ github.ref }}
+
+permissions: {}
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      pr: ${{ steps.rp.outputs.pr }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          target-branch: ${{ github.ref_name }}
+
+  # The release pull request also points the site's one-file quickstart at the version it releases. The SQL is
+  # generated here exactly as publish.yml generates the asset, so its SHA-256 is known before the release exists.
+  quickstart:
+    needs: release-please
+    if: needs.release-please.outputs.pr && !needs.release-please.outputs.release_created
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BRANCH }}
+      - name: Re-bundle the quickstart for the release
+        run: |
+          version="$(jq -r .version META.json)"
+          examples/quickstart/bundle.sh "$version" "$(scripts/release-sql.sh "$version")"
+          git diff --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -sqam "chore: point the quickstart at $version"
+          git push origin "HEAD:$BRANCH"
+
+  # A tag created with GITHUB_TOKEN starts no workflow, so the release is handed to publish.yml explicitly.
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f tag="$TAG" -f dry-run=false

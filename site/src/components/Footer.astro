@@ -1,0 +1,10 @@
+---
+// Starlight's own footer (edit link, pagination), then the maker's line on every docs page.
+import Default from "@astrojs/starlight/components/Footer.astro";
+import MadeBy from "./MadeBy.astro";
+---
+<Default><slot /></Default>
+<div class="docs-made-by"><MadeBy /></div>
+<style>
+  .docs-made-by { margin-top: 2.5rem; padding-top: 1.25rem; border-top: 1px solid var(--sl-color-hairline); color: var(--sl-color-gray-3); }
+</style>

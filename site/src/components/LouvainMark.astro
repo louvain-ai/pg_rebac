@@ -1,0 +1,5 @@
+---
+// Louvain's mark, inline so it takes the maker's own colour in both themes (--louvain-mark).
+const { size = 16 } = Astro.props;
+---
+<svg class="louvain-mark" xmlns="http://www.w3.org/2000/svg" viewBox="5.8 8.4 49.8 49.8" width={size} height={size} aria-hidden="true"><path d="M15 15V49H49" fill="none" stroke="currentColor" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="15" cy="15" r="6.6" fill="currentColor"></circle><circle cx="49" cy="49" r="6.6" fill="currentColor"></circle><circle cx="15" cy="49" r="9.2" fill="currentColor"></circle></svg>

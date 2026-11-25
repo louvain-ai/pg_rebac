@@ -1,0 +1,38 @@
+/* pg_rebac: cool paper and ink, one indigo accent. Dark is Starlight's default; light overrides. */
+:root {
+  --louvain-mark: #a1aaff;
+  --sl-font: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sl-color-accent-low: #241f4a;
+  --sl-color-accent: #8a7ff5;
+  --sl-color-accent-high: #cdc8ff;
+  --sl-color-white: #f3f5f8;
+  --sl-color-gray-1: #e3e7ee;
+  --sl-color-gray-2: #c2c9d4;
+  --sl-color-gray-3: #98a2b3;
+  --sl-color-gray-4: #5f6878;
+  --sl-color-gray-5: #2a313c;
+  --sl-color-gray-6: #181d25;
+  --sl-color-black: #10141b;
+}
+:root[data-theme="light"] {
+  --louvain-mark: #535bd5;
+  --sl-color-accent-low: #e3e0fb;
+  --sl-color-accent: #4a3fd0;
+  --sl-color-accent-high: #2a2185;
+  --sl-color-white: #121826;
+  --sl-color-gray-1: #182030;
+  --sl-color-gray-2: #2f3848;
+  --sl-color-gray-3: #4d5768;
+  --sl-color-gray-4: #7a8494;
+  --sl-color-gray-5: #d5dae1;
+  --sl-color-gray-6: #e9ecf0;
+  --sl-color-gray-7: #f1f3f6;
+  --sl-color-black: #f8f9fb;
+}
+/* No capsules anywhere: the one round control Starlight ships gets the house radius. */
+starlight-menu-button button { border-radius: 6px !important; }
+.sl-markdown-content table { display: block; overflow-x: auto; }
+.sl-markdown-content code:not(pre code) { border-radius: 4px; }
+
+code, pre, kbd { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }

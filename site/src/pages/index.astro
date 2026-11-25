@@ -1,0 +1,326 @@
+---
+import GitHubMark from "../components/GitHubMark.astro";
+import "@fontsource-variable/instrument-sans";
+import "@fontsource-variable/jetbrains-mono";
+import "../styles/cover.css";
+import LouvainMark from "../components/LouvainMark.astro";
+import MadeBy from "../components/MadeBy.astro";
+import { users } from "../data/users";
+
+// Previews and local builds are never indexed; only the production deployment is (see astro.config.mjs).
+const indexable = process.env.VERCEL_ENV === "production";
+const repo = "https://github.com/louvain-ai/pg_rebac";
+const title = "pg_rebac: search everything, return only what's authorized";
+const description =
+  "Native relationship-based authorization for PostgreSQL, pgvector and AI retrieval. SpiceDB relationships mirrored into an indexed readable set that Postgres plans like any other join.";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    {/* Starlight writes the docs pages' canonical from `site`; this cover is outside Starlight, so it writes its own. */}
+    <link rel="canonical" href={new URL("/", Astro.site).href} />
+    {!indexable && <meta name="robots" content="noindex, nofollow" />}
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script is:inline>
+      // Share Starlight's stored theme, so the cover and the docs agree.
+      (() => {
+        let t = "";
+        try { t = localStorage.getItem("starlight-theme") || ""; } catch {}
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="bar">
+      <a class="brand" href="/" aria-label="pg_rebac home">
+        <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true" fill="none">
+          <rect x="3" y="3" width="26" height="26" rx="4" stroke="currentColor" stroke-width="2.5"></rect>
+          <path d="M10 10v12M16 10v12M22 10v12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"></path>
+          <path d="M7 16h18" class="brand-bar" stroke-width="2.5" stroke-linecap="round"></path>
+        </svg>
+        <span>pg_rebac</span>
+      </a>
+      <nav aria-label="Site">
+        <a href="/docs/getting-started/">Docs</a>
+        <a class="gh" href={repo}><GitHubMark />GitHub</a>
+        <button class="theme" type="button" aria-label="Switch between light and dark" data-theme-toggle>
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18V3Z" fill="currentColor"></path><circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor" stroke-width="1.5"></circle></svg>
+        </button>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <div class="hero-text">
+          <h1>Search everything. Return only what's authorized.</h1>
+          <p class="sub">Native relationship-based authorization for PostgreSQL, pgvector and AI retrieval.</p>
+          <p class="lede">
+            pg_rebac mirrors SpiceDB's relationships into an indexed readable set. Put it in your
+            <code>where</code> clause and Postgres plans it as one more join; for a vector search,
+            <code>rebac.fenced_ids</code> returns the k nearest rows a person may read. Either way the fence applies
+            before the <code>order by</code> and the <code>limit</code>.
+          </p>
+          <div class="actions">
+            <a class="btn primary" href="/docs/getting-started/">Get started</a>
+            <a class="btn gh" href={repo}><GitHubMark size={18} />Source on GitHub</a>
+          </div>
+        </div>
+
+        <figure class="pair" aria-label="A fenced query and the plan Postgres chooses for it">
+          <div class="pane">
+            <figcaption>The query</figcaption>
+            <pre class="code"><code><span class="k">begin</span>;
+<span class="k">set local</span> rebac.tenant = <span class="s">'acme'</span>;
+
+<span class="k">select</span> p.id, p.body
+<span class="k">from</span> <mark><span class="f">rebac.fenced_ids</span>(<span class="s">'priya'</span>, <span class="s">'passage'</span>, $1, 20)</mark> f
+<span class="k">join</span> passage p <span class="k">on</span> p.id = f.id::bigint
+<span class="k">order by</span> f.distance;
+<span class="k">commit</span>;</code></pre>
+          </div>
+          <div class="pane plan">
+            <figcaption>What Postgres plans</figcaption>
+            <pre class="code"><code>Limit
+  <span class="c">-&gt;</span>  Index Scan using passage_embedding_idx on passage x
+        Order By: (embedding &lt;=&gt; $1)
+        Filter: (SubPlan 1)
+        SubPlan 1
+<mark>          <span class="c">-&gt;</span>  Limit
+                <span class="c">-&gt;</span>  Index Scan using readable_container_idx on readable r
+                      Index Cond: ((tenant = $4)
+                        AND (container = x.container))
+                      Filter: (principal = ANY ($2))</mark></code></pre>
+          </div>
+          <p class="note">
+            The plan of its HNSW leg, <code>explain (costs off)</code> on Postgres 17 and pgvector 0.8, the long line
+            wrapped. The HNSW scan stays outside; each candidate costs one index probe against the reader and the grant
+            nodes it reads through (<code>$2</code>). A reader with few candidate rows is sorted exactly instead.
+          </p>
+        </figure>
+      </section>
+
+      <section class="install" aria-labelledby="install">
+        <h2 id="install">Try it in one command</h2>
+        <p class="section-lede">
+          With Docker (Compose 2.23 or later), and nothing to clone. It starts Postgres with pgvector, SpiceDB and <code>rebacd</code>, installs
+          the released SQL, writes the relationships through <code>rebac.write</code>, and runs one vector search as two
+          people.
+        </p>
+        <pre class="code block"><code>curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - run --rm demo</code></pre>
+        <p class="transcript-label">What it prints, abridged:</p>
+        <pre class="code block transcript"><code><span class="c">1. The same vector search, top 5 nearest to "salary pay review", fenced inside the query:</span>
+
+   as alice (reads handbook and payroll)
+   handbook  | Annual pay review
+   payroll   | Salary bands 2026
+   handbook  | Pay days
+   payroll   | Payroll cut-off
+   payroll   | Overtime pay
+
+   as bob (reads handbook and deals)
+   handbook  | Annual pay review
+   handbook  | Pay days
+   deals     | Commission plan
+   deals     | Reseller pay terms
+   handbook  | Expenses
+
+<span class="c">2. Filtering AFTER retrieval instead: the top 5 for everyone, then drop what bob may not read.</span>
+   rows_left_for_bob: <mark>1</mark>          <span class="c">-- board passages took 4 of the 5 places</span>
+
+<span class="c">3. Revoke bob from deals. In force when its transaction commits, before rebacd relays it:</span>
+   bob, the same search again
+   handbook  | Annual pay review
+   handbook  | Pay days
+   handbook  | Expenses
+
+<span class="c">4. A principal nobody has asked about is an error (RB404), never an empty set:</span>
+   mallory → RB404 "this principal has not been projected"
+
+<span class="c">You just saw one vector search return different rows per person, fenced inside the query,
+and a revocation in force at commit. Stop it and forget everything:</span>
+  curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v
+<span class="c">Docs:</span> https://pgrebac.com/docs/getting-started/</code></pre>
+        <h3 class="next-title">Next steps</h3>
+        <ul class="next">
+          <li><strong>Install into your own Postgres 14+:</strong> <code>psql -v ON_ERROR_STOP=1 -f sql/rebac.sql</code>, no extension needed, hosted or not.</li>
+          <li><strong>From your migrations:</strong> <code>npm i pg-rebac</code> bundles the same SQL with a <code>migrate</code> function.</li>
+          <li><strong>The daemon:</strong> <code>docker pull ghcr.io/louvain-ai/rebacd</code> or <code>cargo install rebacd</code>.</li>
+        </ul>
+        <p class="install-links">
+          <a href="/docs/getting-started/">Getting started</a>
+          <a href="/docs/schema-support/">Supported SpiceDB schemas</a>
+          <a href="/docs/faq/">FAQ</a>
+        </p>
+      </section>
+
+      <section class="why" aria-labelledby="why">
+        <h2 id="why">Why it exists</h2>
+        <div class="facts">
+          <article>
+            <h3>Fenced vector search in 4 to 7 ms</h3>
+            <p>
+              Readers who can see 5% to 50% of a tenant got all k rows at recall 0.90 to 0.96, against 1.9 ms for
+              the same search unfenced.
+            </p>
+            <p class="scope">
+              p50 of 10 queries, one client, on 500,000 synthetic 128-dimension passages, HNSW at pgvector defaults,
+              k = 20, <code>hnsw.iterative_scan = relaxed_order</code>, one 4-CPU machine with everything cached.
+              Readers below about 1% take the exact path instead, 1.6 ms at full recall. At 768 dimensions with
+              skewed containers the same readers took 3 to 29 ms (p99 5 to 61 ms), on data where recall says little
+              (unfenced HNSW scored 0.09 on it). <a
+              href="/docs/performance/">The study, its method and its limits</a>
+            </p>
+          </article>
+          <article>
+            <h3>Revocations in force at commit</h3>
+            <p>
+              Write relationships with <code>rebac.write</code> in your own transaction. A deferred trigger removes
+              the revoked containers from the projection before the commit, whether or not SpiceDB or the daemon is
+              up.
+            </p>
+            <p class="scope">
+              Exact for direct relations, arrows and subject sets, including a refresh that races the commit, in a
+              READ COMMITTED transaction (the Postgres default). Revocations written straight to SpiceDB are
+              narrowed from its Watch stream as they arrive, or reads fail closed. <a href="/docs/concepts/consistency/">What is
+              guaranteed</a>
+            </p>
+          </article>
+          <article>
+            <h3>No remote authorization call on a warm read</h3>
+            <p>
+              Once a principal is projected, a fenced query reads only local tables: the readable set and the
+              principal's state. Nothing on the read path calls SpiceDB or the daemon.
+            </p>
+            <p class="scope">
+              A principal's first read is <code>RB404</code>: your application asks the daemon to project it, which
+              asks SpiceDB once, then retries. Grants arrive through refreshes in the background. <a
+              href="/docs/concepts/readable-set/">The readable set</a>
+            </p>
+          </article>
+        </div>
+        <p class="why-more">Row-level security, SpiceDB per query or a vector store's filters may be enough for you. <a href="/docs/why-not/">When each is, and when it is not</a></p>
+      </section>
+
+      <section class="answers" aria-labelledby="answers">
+        <h2 id="answers">Three different answers</h2>
+        <p class="section-lede">
+          A permission filter that returns nothing when it is broken looks exactly like one that is working. pg_rebac
+          keeps the cases apart.
+        </p>
+        <dl>
+          <div>
+            <dt><code>RB404</code></dt>
+            <dd><strong>Never asked.</strong> Nobody has projected this principal yet. Ask the daemon's
+              <code>POST /lookup</code>, then retry.</dd>
+          </div>
+          <div>
+            <dt><code>{"{ }"}</code></dt>
+            <dd><strong>Nothing.</strong> Asked, and this principal can read nothing. An empty set means exactly
+              that.</dd>
+          </div>
+          <div>
+            <dt><code>RB503</code></dt>
+            <dd><strong>Unavailable.</strong> The daemon is not live, the set is too old, it is over its cap, or SpiceDB could not be asked.
+              The read fails closed.</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="parts" aria-labelledby="parts">
+        <h2 id="parts">Pure SQL, and a daemon to keep it in step</h2>
+        <div class="facts">
+          <article>
+            <h3>The schema is one SQL file</h3>
+            <p>
+              Plain SQL and PL/pgSQL, no C extension, so it installs on Postgres 14 or later, hosted or not. The
+              reads, the narrowing trigger, the queues and the checks all live there.
+            </p>
+          </article>
+          <article>
+            <h3>rebacd talks to SpiceDB</h3>
+            <p>
+              A Rust daemon relays the outbox in order, refreshes principals, backfills tenants, and runs
+              <code>rebacd verify</code>, which diffs the projection against SpiceDB and exits non-zero on any extra
+              row. Shadow mode proves a projection before anything reads it.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="engine" aria-labelledby="engine">
+        <h2 id="engine">Use it with Louvain Engine</h2>
+        <div class="facts">
+          <article>
+            <p>
+              <a href="https://github.com/louvain-ai/louvain-engine">Louvain Engine</a> is open-source,
+              permission-aware hybrid retrieval for company knowledge. Its <code>@louvain/engine-pg-rebac</code> binding
+              takes each reader's readable set from pg_rebac, so SpiceDB decides who reads which collection.
+            </p>
+            <p class="scope">
+              The engine runs its pgvector and keyword legs narrowed to that set, re-checks every row, and fuses them. A
+              reader pg_rebac was never asked about is looked up through <code>rebacd</code> once; an unavailable
+              projection fails the search instead of returning less. <a
+              href="https://github.com/louvain-ai/louvain-engine/tree/main/examples/pg-rebac">The example</a>
+            </p>
+          </article>
+          <div>
+            <pre class="code block"><code><span class="c"># the engine, Postgres, pg_rebac, SpiceDB and rebacd</span>
+git clone https://github.com/louvain-ai/louvain-engine
+cd louvain-engine &amp;&amp; examples/pg-rebac/run.sh
+
+"salary review" as alice:
+  1. salary-bands-2027
+  2. payroll-cut-off
+  3. annual-pay-review
+
+"salary review" as bob:
+  1. annual-pay-review</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="users" aria-labelledby="users">
+        <h2 id="users">Users</h2>
+        <ul>
+          {users.map((u) => (
+            <li>
+              <a class="who" href={u.href}>
+                {u.mark === "louvain" && <LouvainMark size={22} />}
+                <span>{u.name}</span>
+              </a>
+              <div>
+                <p>{u.line}</p>
+                <p class="use-status">{u.status}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <p class="add">Running pg_rebac? <a href={`${repo}/issues`}>Open an issue</a> to be listed.</p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <MadeBy />
+      <p>Apache-2.0. <a class="gh" href={repo}><GitHubMark size={14} />github.com/louvain-ai/pg_rebac</a>. SpiceDB is a project of Authzed; pg_rebac is
+        not affiliated with it.</p>
+    </footer>
+
+    <script is:inline>
+      document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
+        const root = document.documentElement;
+        const dark = root.dataset.theme
+          ? root.dataset.theme === "dark"
+          : matchMedia("(prefers-color-scheme: dark)").matches;
+        const next = dark ? "light" : "dark";
+        root.dataset.theme = next;
+        try { localStorage.setItem("starlight-theme", next); } catch {}
+      });
+    </script>
+  </body>
+</html>

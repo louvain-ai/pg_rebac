@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/rebac-schema", "crates/rebacd"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/louvain-ai/pg_rebac"
+homepage = "https://pgrebac.com"
+rust-version = "1.88"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
