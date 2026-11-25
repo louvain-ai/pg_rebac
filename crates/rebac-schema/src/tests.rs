@@ -227,3 +227,13 @@ fn accepts_a_wildcard_on_the_projected_type() {
         ]
     );
 }
+
+#[test]
+fn non_ascii_text_is_an_error_or_skipped_never_a_panic() {
+    // Outside a comment or string, a schema has no use for it: an error naming the line.
+    let e = parse("definition user {}\ndefinition caf\u{e9} {}").unwrap_err();
+    assert_eq!(e.line, 2);
+    // In a comment or a caveat's string it is inert.
+    parse("// caf\u{e9}\n/** na\u{ef}ve */\ncaveat c(s string) { s == \"\u{e9}t\u{e9}\" }\ndefinition user {}").unwrap();
+    assert!(parse("caveat c(s string) { s == \"\u{e9}").is_err());
+}

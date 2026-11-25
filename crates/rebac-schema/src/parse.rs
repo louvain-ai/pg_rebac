@@ -63,7 +63,13 @@ fn lex(src: &str) -> Result<Lexer, ParseError> {
             while j < b.len() && b[j] != b'"' {
                 j += if b[j] == b'\\' { 2 } else { 1 };
             }
-            toks.push((Tok::Ident(src[i..=j.min(b.len() - 1)].to_string()), line));
+            if j >= b.len() {
+                return Err(ParseError {
+                    line,
+                    message: "unterminated string".into(),
+                });
+            }
+            toks.push((Tok::Ident(src[i..=j].to_string()), line));
             i = j + 1;
         } else if c.is_ascii_alphanumeric() || c == b'_' {
             let start = i;
@@ -74,11 +80,16 @@ fn lex(src: &str) -> Result<Lexer, ParseError> {
         } else if let Some(s) = SYMS.iter().find(|s| src[i..].starts_with(**s)) {
             toks.push((Tok::Sym(s), line));
             i += s.len();
-        } else {
+        } else if c.is_ascii() {
             // Caveat expressions use operators no other part of a schema does (==, <, !, ...): keep them as
             // one-character idents so the skipping parser can step over them.
-            toks.push((Tok::Ident((c as char).to_string()), line));
+            toks.push((Tok::Ident(char::from(c).to_string()), line));
             i += 1;
+        } else {
+            return Err(ParseError {
+                line,
+                message: "a schema is ASCII outside its comments and strings".into(),
+            });
         }
     }
     Ok(Lexer { toks })
