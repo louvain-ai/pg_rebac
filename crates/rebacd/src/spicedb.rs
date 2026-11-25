@@ -257,12 +257,14 @@ impl SpiceDb {
         .await
     }
 
-    /// Every subject of `subject_type` holding `permission` on a resource.
+    /// Every subject of `subject_type` holding `permission` on a resource. With `subject_relation`, the subject sets
+    /// of that type and relation that hold it (`group:acme/eng#member`).
     pub async fn lookup_subjects(
         &self,
         resource: &str,
         permission: &str,
         subject_type: &str,
+        subject_relation: Option<&str>,
         token: Option<&str>,
         deadline: Duration,
     ) -> Result<Vec<String>, Status> {
@@ -271,10 +273,14 @@ impl SpiceDb {
             resource: Some(object(resource)?),
             permission: permission.into(),
             subject_object_type: subject_type.into(),
+            optional_subject_relation: subject_relation.unwrap_or_default().into(),
             ..Default::default()
         };
         let mut perms = self.perms.clone();
         let st = subject_type.to_string();
+        let rel = subject_relation
+            .map(|r| format!("#{r}"))
+            .unwrap_or_default();
         bounded(deadline, async move {
             let mut stream = perms
                 .lookup_subjects(Self::req(msg, deadline))
@@ -284,7 +290,7 @@ impl SpiceDb {
             while let Some(item) = stream.next().await {
                 if let Some(s) = item?.subject {
                     if s.permissionship == pb::LookupPermissionship::HasPermission as i32 {
-                        out.push(format!("{st}:{}", s.subject_object_id));
+                        out.push(format!("{st}:{}{rel}", s.subject_object_id));
                     }
                 }
             }

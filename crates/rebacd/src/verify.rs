@@ -35,6 +35,7 @@ pub async fn diff(
     let principals: Vec<String> = db
         .query(
             "select principal from rebac.principal_state where tenant = $1 and state = 'projected'
+               and not rebac.is_node(principal)
              order by random() limit $2",
             &[&tenant, &sample.unwrap_or(i64::MAX)],
         )
@@ -42,7 +43,12 @@ pub async fn diff(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    let sql = format!("select container from rebac.{table} where tenant = $1 and principal = $2");
+    // Live: what the principal reads, through its grant nodes too. Shadow projects every grant per principal.
+    let sql = if table == "readable" {
+        "select rebac.expanded($1, $2)".to_string()
+    } else {
+        format!("select container from rebac.{table} where tenant = $1 and principal = $2")
+    };
     let mut d = Diff::default();
     for p in principals {
         // The projection first, then the authority: a container revoked in between reads as missing, never extra.

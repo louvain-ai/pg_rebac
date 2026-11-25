@@ -97,19 +97,28 @@ pub async fn refresh_pass(ctx: &Ctx, concurrency: usize) -> anyhow::Result<usize
             }
         })
         .await;
+    // With grant nodes on, a resource's readers include the subject sets that view it: their nodes are re-projected
+    // too (an arrow tuple moving a file under a space a group reads, say).
+    let sets: Vec<(String, String)> = if resources.is_empty() {
+        vec![]
+    } else {
+        ctx.pool
+            .get()
+            .await?
+            .query(
+                "select resource_type, relation from rebac.view_relation where kind = 'set' and rebac.nodes_on()
+                 order by 1, 2",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect()
+    };
     for row in resources {
         let (t, res, tok, gen): (String, String, Option<String>, i64) =
             (row.get(0), row.get(1), row.get(2), row.get(3));
-        let subjects = ctx
-            .spicedb
-            .lookup_subjects(
-                &res,
-                &ctx.projection.permission,
-                &ctx.projection.subject_type,
-                tok.as_deref(),
-                ctx.config.deadline(),
-            )
-            .await;
+        let subjects = viewers(ctx, &res, &sets, tok.as_deref()).await;
         let c = ctx.pool.get().await?;
         match subjects {
             Ok(s) => {
@@ -126,6 +135,37 @@ pub async fn refresh_pass(ctx: &Ctx, concurrency: usize) -> anyhow::Result<usize
         }
     }
     Ok(worked)
+}
+
+/// Who views a resource now, per SpiceDB: the subjects of the projected subject type, and the subject sets of each
+/// `(type, relation)` in `sets` (`group:acme/eng#member`).
+async fn viewers(
+    ctx: &Ctx,
+    resource: &str,
+    sets: &[(String, String)],
+    token: Option<&str>,
+) -> Result<Vec<String>, tonic::Status> {
+    let perm = &ctx.projection.permission;
+    let deadline = ctx.config.deadline();
+    let mut out = ctx
+        .spicedb
+        .lookup_subjects(
+            resource,
+            perm,
+            &ctx.projection.subject_type,
+            None,
+            token,
+            deadline,
+        )
+        .await?;
+    for (ty, rel) in sets {
+        out.extend(
+            ctx.spicedb
+                .lookup_subjects(resource, perm, ty, Some(rel), token, deadline)
+                .await?,
+        );
+    }
+    Ok(out)
 }
 
 pub async fn sweep_loop(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {

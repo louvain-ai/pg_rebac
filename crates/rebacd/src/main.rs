@@ -87,6 +87,12 @@ async fn main() -> anyhow::Result<()> {
             }
             let ctx = Arc::new(Ctx::connect(config).await?);
             closure::check_at_start(&ctx, accept_schema).await?;
+            let upgrade = ctx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = backfill::remirror_if_pending(&upgrade).await {
+                    tracing::error!(error = %rebacd::logs::kind_of(&e), "could not re-read the mirrors after the upgrade; the next start retries");
+                }
+            });
             run(ctx).await
         }
         Cmd::Backfill { tenant, shadow } => {

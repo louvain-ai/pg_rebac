@@ -96,7 +96,7 @@ fn op(touch: bool, resource: &str, relation: &str, subject: &str) -> TupleOp {
 async fn set_of(ctx: &Ctx, tenant: &str, p: &str) -> Vec<String> {
     let c = ctx.pool.get().await.unwrap();
     c.query(
-        "select container from rebac.readable where tenant = $1 and principal = $2 order by 1",
+        "select c from rebac.expanded($1, $2) c order by 1",
         &[&tenant, &p],
     )
     .await

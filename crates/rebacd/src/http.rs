@@ -79,7 +79,7 @@ async fn lookup(
     State(ctx): State<Arc<Ctx>>,
     Json(b): Json<LookupBody>,
 ) -> (StatusCode, Json<LookupReply>) {
-    if b.tenant.is_empty() || b.principal.is_empty() {
+    if b.tenant.is_empty() || b.principal.is_empty() || b.principal.starts_with('#') {
         return (
             StatusCode::BAD_REQUEST,
             Json(LookupReply {
@@ -97,13 +97,19 @@ async fn lookup(
     )
     .await
     {
-        Ok(p) => (
-            StatusCode::OK,
-            Json(LookupReply {
-                containers: Some(p.containers),
-                error: None,
-            }),
-        ),
+        Ok(p) => {
+            // The grant nodes it reads through that a read would refuse are re-projected too, so this read succeeds.
+            if let Err(e) = refresh_stale_nodes(&ctx, &b.tenant, &b.principal).await {
+                tracing::warn!(error = %e, "a grant node could not be re-projected");
+            }
+            (
+                StatusCode::OK,
+                Json(LookupReply {
+                    containers: Some(p.containers),
+                    error: None,
+                }),
+            )
+        }
         Err(e) => {
             let kind = match &e {
                 project::ProjectError::Unavailable(st) => format!("grpc:{:?}", st.code()),
@@ -272,6 +278,27 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json::Va
             Json(serde_json::json!({ "error": "database_unavailable" })),
         ),
     }
+}
+
+async fn refresh_stale_nodes(
+    ctx: &Ctx,
+    tenant: &str,
+    principal: &str,
+) -> Result<(), project::ProjectError> {
+    let nodes: Vec<String> = ctx
+        .pool
+        .get()
+        .await
+        .map_err(anyhow::Error::from)?
+        .query("select rebac.stale_nodes($1, $2)", &[&tenant, &principal])
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    for n in nodes {
+        project::refresh_one(ctx, tenant, &n, None, ctx.config.read_deadline()).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

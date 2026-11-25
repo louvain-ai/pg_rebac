@@ -1,0 +1,2 @@
+# Product and API names that are words in the docs, not code (clippy::doc_markdown).
+doc-valid-idents = ["SpiceDB", "LookupResources", "LookupSubjects", "CheckPermission", "WriteRelationships", "PgBouncer", "PostgreSQL", ".."]
