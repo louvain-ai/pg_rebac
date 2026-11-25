@@ -25,8 +25,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
@@ -59,8 +60,8 @@ jobs:
         run: REBAC_TEST_AS_OWNER=1 tests/sql/run.sh
       # THE REVOCATION RACES, repeated: two sessions (dblink) race a refresh against a revocation in both orders, and
       # a held lock fails the commit (fault injection); 13 races one against a revocation applied from Watch, 19 a grant
-      # node's and a member's refresh against set-grant and membership revocations. Deterministic by construction; repeated to catch a regression
-      # that only loses sometimes.
+      # node's and a member's refresh against set-grant and membership revocations. Deterministic by construction;
+      # repeated to catch a regression that only loses sometimes.
       - name: revocation vs refresh races, 20 rounds
         run: for i in $(seq 20); do tests/sql/run.sh '0[69]_*' && tests/sql/run.sh '1[39]_*' || exit 1; done
       # The upgrade from the last release: its SQL, projected as it did, then this commit's applied twice.
