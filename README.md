@@ -5,11 +5,9 @@
 Native relationship-based authorisation for PostgreSQL, pgvector and AI retrieval: SpiceDB permissions, enforced
 inside the Postgres plan, before the `order by` and the `limit`.
 
-- **Fenced ANN in 4 to 7 ms at 5% to 50% reader breadth**, all k rows at recall 0.90 to 0.96. That is p50 of 10
-  queries, one client, on 500,000 synthetic 128-dimension passages with a warm cache. A 768-dimension run with
-  skewed containers took 3 to 29 ms (p99 5 to 61 ms) at recall 0.09 to 0.23, on synthetic data where unfenced HNSW
-  scored 0.09 too, with concurrency measured as well; see
-  [the studies and their limits](docs/planner.md).
+- **Fenced ANN in 4 to 7 ms at 5% to 50% reader breadth**, all k rows at recall 0.90 to 0.96: p50 of 10 queries,
+  one client, 500,000 synthetic 128-dimension passages, warm cache. The 768-dimension run, its concurrency and the
+  limits of both are in [the studies](docs/planner.md).
 - **No remote authorisation call on a warm read.** A projected principal's fenced query reads local tables only.
   The first read of a principal asks the daemon once (`RB404`, then retry).
 
@@ -102,11 +100,10 @@ in force at commit. Stop it and forget everything:
 Docs: https://pgrebac.com/docs/getting-started/
 ```
 
-The first run pulls four images; after that a run takes about six seconds. Nothing listens on your host, and
-`curl -fsSL https://pgrebac.com/quickstart.yml | docker compose -f - down -v` stops it and forgets everything. The file
-is generated from [`examples/quickstart/`](examples/quickstart/) by `bundle.sh`; from a clone,
-`docker compose -f examples/quickstart/docker-compose.yml run --rm demo` runs the same demo with `rebacd` built from
-source.
+The first run pulls four images; after that a run takes about six seconds. Nothing listens on your host, and the
+`down -v` line it prints removes it. The file is generated from [`examples/quickstart/`](examples/quickstart/) by
+`bundle.sh`; from a clone, `docker compose -f examples/quickstart/docker-compose.yml run --rm demo` runs the same demo
+with `rebacd` built from source.
 
 **Next steps:**
 
@@ -162,11 +159,9 @@ Because a search engine's `limit` runs before your filter, and everything it com
   relaxed ANN took about 100 ms for recall 0.54.
 - **Counts, snippets and rankings leak.** Anything computed before the filter (a "1,240 results" total, a highlighted
   snippet, a facet count, a "did you mean", a page offset) was computed over rows the user may not read, and says
-  something about them. A fence in the `where` clause means no such row is ranked, counted or returned. (This point is
-  about the shape of the query, not a measurement.)
-- **Failure has to be an answer, not an empty page.** Here a stale projection is `RB503`, a principal nobody has asked
-  about is `RB404`, and a missing tenant is `RB400`; none of them is an empty set by accident, and none of them returns
-  rows it has not checked.
+  something about them. A fence in the `where` clause means no such row is ranked, counted or returned.
+- **Failure has to be an answer, not an empty page.** A stale projection is `RB503`, a principal nobody has asked
+  about is `RB404`, and a missing tenant is `RB400`. None returns rows it has not checked.
 
 ## In production
 
@@ -179,12 +174,14 @@ SpiceDB, and `rebacd verify --all-tenants --shadow` compares the two and fails o
 - **One read primitive.** `rebac.readable_set(principal)` is the containers a principal may view, optionally
   `within` a list (an intersection, which can only narrow). `rebac.readable_by(principal, container)` is a per-row
   check, for single lookups.
-- **Three different answers.**
+- **Four answers, never confused.**
   - `RB404` means the principal was never asked: call the daemon's `POST /lookup`, then retry.
   - An empty set means the principal was asked and can read nothing.
   - `RB503` means unavailable: the daemon is not live, the principal's set is too old or of unknown age, it is over
     its cap, or SpiceDB could not be asked.
-  - A missing `rebac.tenant` is `RB400`. None of these is ever an empty set by accident.
+  - A missing `rebac.tenant` is `RB400`.
+
+  Only the second is an empty set.
 - **Revocations in force at commit.** Write relationships with `rebac.write(op, resource, relation, subject)` in
   your own transaction. A deferred trigger removes every revocation it queued from the projection before the
   transaction commits, whether or not SpiceDB or the daemon is up. This holds for direct relations, arrows, subject
@@ -257,7 +254,7 @@ The projected permission, `container#view` by default, may be any union (`+`) of
 
 Refused, each with its reason:
 
-- exclusion (`-`): removing a tuple from its subtracted side grants;
+- exclusion (`-`): adding a tuple to its subtracted side revokes, and only removals narrow;
 - intersection (`&`): narrowing keeps a container another granted relation still holds, which is right for a union only;
 - the intersection arrow (`.all()`): removing one of its tuples can grant;
 - caveats and expiring relationships;
@@ -291,10 +288,11 @@ REBAC_TLS_IT=1 REBAC_TLS_CA=$(tests/tls/up.sh) cargo test -p rebacd --test tls  
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push to main and every pull request:
 
-- `cargo clippy -D warnings` and `cargo test`;
-- the SQL suite on Postgres 14, 15, 16 and 17 with pgvector;
-- 20 rounds of the revocation-versus-refresh races and the held-lock fault (`tests/sql/run.sh '0[69]_*'`);
-- the daemon against a real SpiceDB (`REBAC_IT=1`).
+- `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test`;
+- the SQL suite on Postgres 14, 15, 16 and 17 with pgvector, as a superuser and as a database owner that is not one;
+- 20 rounds of the revocation races (`06`, `09`, `13`, `19`) and the held-lock fault, and the upgrade from 0.2.0;
+- the SQL through PgBouncer in transaction mode;
+- the daemon against a real SpiceDB (`REBAC_IT=1`), and SpiceDB as an oracle over randomised schemas;
 - the quickstart both ways, checked by `examples/quickstart/check-output.sh`: the file pgrebac.com serves (which must be
   what `examples/quickstart/bundle.sh` writes) and the demo built from the commit.
 
