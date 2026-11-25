@@ -315,6 +315,10 @@ jobs:
 
   # pgrebac.com is deployed from the latest release's tree, never from main, so the docs describe what is released.
   # A maintenance release that is not the latest leaves the site alone. Without a token the job warns and stops.
+  # The deploy runs in site/: the project's Root Directory is the repository's, so its build settings live in
+  # site/vercel.json (Astro, npm ci, npm run build, dist), which the CLI reads only from the directory it deploys. From
+  # the repository root it uploads the whole tree, finds no framework and builds nothing, and every path is a 404.
+  # Then the job reads the live site back and fails unless it serves this tag's quickstart.
   site:
     needs: [plan, quickstart]
     if: ${{ !cancelled() && needs.quickstart.result == 'success' && needs.plan.outputs.latest == 'true' && inputs.dry-run == false }}
@@ -331,6 +335,20 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
           persist-credentials: false
-      - run: |
+      - name: Deploy site/ to production
+        run: |
           [ -n "$VERCEL_TOKEN" ] || { echo "::warning::No VERCEL_TOKEN: deploy pgrebac.com from $TAG by hand"; exit 0; }
-          npx --yes vercel@66.6.0 deploy --prod --yes --token "$VERCEL_TOKEN"
+          npx --yes vercel@66.6.0 deploy --prod --yes --cwd site --token "$VERCEL_TOKEN"
+      - name: pgrebac.com serves this release
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          [ -n "$VERCEL_TOKEN" ] || exit 0
+          get() { curl -fsS --retry 5 --retry-all-errors --retry-delay 5 -o "$2" "https://pgrebac.com$1"; }
+          get / index.html
+          get /docs/getting-started/ getting-started.html
+          get /quickstart.yml quickstart.yml
+          [ "$(sed -n 's/^# pg_rebac version: //p' quickstart.yml)" = "$VERSION" ] ||
+            { echo "pgrebac.com/quickstart.yml does not name $VERSION" >&2; exit 1; }
+          cmp -s quickstart.yml site/public/quickstart.yml ||
+            { echo "pgrebac.com/quickstart.yml is not $TAG's site/public/quickstart.yml" >&2; exit 1; }
