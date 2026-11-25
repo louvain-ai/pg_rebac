@@ -22,19 +22,28 @@ inside the Postgres plan, before the `order by` and the `limit`.
 </p>
 
 SpiceDB stays the authority for who may read what. pg_rebac keeps a local, indexed projection of one permission, and
-gives every query the same fence:
+gives every query the same fence. For a vector search, the k nearest rows a person may read:
 
 ```sql
 set local rebac.tenant = 'acme';
-set local hnsw.iterative_scan = relaxed_order;   -- see "Vector search" below
-select id from passage
+select p.id, p.body
+from rebac.fenced_ids('priya', 'passage', $1, 20) f
+join passage p on p.id = f.id::bigint
+order by f.distance;
+```
+
+`rebac.fenced_ids` counts the reader's candidate rows and sorts them exactly when there are few, or runs the HNSW
+scan with a fence probe per candidate when there are many (see "Vector search" below). For any other filter, put
+the set in the `where` clause:
+
+```sql
+select * from ticket
 where container in (select * from rebac.readable_set('priya'))
-order by embedding <=> $1
-limit 20;
+  and status = 'open';
 ```
 
 Postgres inlines `rebac.readable_set` into a semi-join on the projection's primary key. So the fence sits inside the
-same plan as a pgvector ordering, a full-text match or anything else, and applies before the order and the limit.
+same plan as a full-text match, a join or anything else, and applies before the order and the limit.
 
 ## Try it in one command
 
@@ -178,9 +187,12 @@ SpiceDB, and `rebacd verify --all-tenants --shadow` compares the two and fails o
   - A missing `rebac.tenant` is `RB400`. None of these is ever an empty set by accident.
 - **Revocations in force at commit.** Write relationships with `rebac.write(op, resource, relation, subject)` in
   your own transaction. A deferred trigger removes every revocation it queued from the projection before the
-  transaction commits, whether or not SpiceDB or the daemon is up. This holds for direct relations, arrows and
-  subject sets, including a refresh racing the commit, and needs READ COMMITTED: a revocation in a REPEATABLE READ
+  transaction commits, whether or not SpiceDB or the daemon is up. This holds for direct relations, arrows, subject
+  sets and wildcards, including a refresh racing the commit, and needs READ COMMITTED: a revocation in a REPEATABLE READ
   or SERIALIZABLE transaction is refused (`RB422`). See [`docs/guarantees.md`](docs/guarantees.md).
+- **Group and company-wide grants stored once.** A grant to a subject set or a wildcard is one row per container,
+  held by its grant node, which each member reads through at query time. The projection grows with grants, not with
+  people times containers ([measured](docs/design/projection-scale.md)).
 - **Two bounds, both failing closed (`RB503`).**
   - *Liveness*: the daemon has heartbeated within `max_staleness_ms` (default 5000). It beats only while it can
     reach both SpiceDB and Postgres. This proves the daemon is up, not that any set is current.
@@ -240,8 +252,8 @@ The projected permission, `container#view` by default, may be any union (`+`) of
 - a self-arrow (`parent->view`);
 - an arrow to another type and a relation there (`workspace->admin`);
 - subject sets one level deep (`group#member`, where `group#member` holds plain object types);
-- wildcards (`user:*`) on a relation of the projected type: a wildcard grant refreshes
-  every principal of the tenant, and its removal narrows every holder of the container.
+- wildcards (`user:*`) on a relation of the projected type: a wildcard grant is stored once, for everyone, and its
+  removal narrows every holder of the container.
 
 Refused, each with its reason:
 
@@ -255,19 +267,17 @@ Refused, each with its reason:
 
 ## Vector search
 
-[`docs/planner.md`](docs/planner.md) measures a fenced HNSW ordering at eight reader breadths, with 500,000 passages
-and pgvector 0.8:
+Use `rebac.fenced_ids(p, tbl, q, k)`. It counts the reader's candidate rows up to `exact_below_rows` (default
+5,000) and sorts them exactly below it, with full recall, or runs the HNSW scan with `relaxed_order` and a fence probe
+per candidate above it, so every reader gets all k rows on the path that is fast for its breadth.
 
-- Readers of 5% to 50% breadth get all k rows at recall 0.90 to 0.96 in 4 to 7 ms, provided
-  `hnsw.iterative_scan = relaxed_order` is set.
-- Without it, the fence silently returns fewer than k rows.
-- Readers below about 1% breadth belong on the exact path, `container = any(array(select * from
-  rebac.readable_set(p)))`. Choose it with `rebac.breadth(p)`, or let `rebac.fenced_ids(p, tbl, q, k)` choose.
-- `rebac.fenced_ids` counts the reader's candidate rows up to `exact_below_rows` (default
-  5,000) and sorts them exactly below it, or runs the fenced HNSW scan with `relaxed_order` above it. Measured on
-  the 128-dimension data (k = 20, p50), exact against ANN at 500 / 2,000 / 5,000 / 10,000 candidate rows: 4.9 / 8.3 /
-  14.2 / 20.9 ms against 85.7 / 25.1 / 10.8 / 6.1 ms, ANN recall 0.60 / 0.80 / 0.92 / 0.89. The crossover is at
-  4,000 to 5,000 candidate rows.
+- At 100,000 people (100,000 containers, 768 dimensions, k = 20), it answered a reader of 1,125 containers in 13.7 ms
+  p50 (exact, recall 1.0) and a reader of 21,000 in 20.1 ms (ANN, recall 0.965)
+  ([`docs/planner.md`](docs/planner.md#measured-at-100000-people)).
+- Without `relaxed_order` a fenced HNSW scan silently returns fewer than k rows: 8% of k at 5% breadth, 20% at 10%,
+  62% at 30%, on the planner study's 500,000 passages.
+- Narrow readers belong on the exact path: below about 5,000 candidate rows it is both faster and complete (4.9 ms
+  at 500 rows against 85.7 ms for ANN at recall 0.60). `fenced_ids` takes it for them.
 
 ## Tests
 

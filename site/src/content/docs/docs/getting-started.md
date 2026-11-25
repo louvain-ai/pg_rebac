@@ -154,8 +154,8 @@ See [the readable set](/docs/concepts/readable-set/) for the three answers a rea
 
 ## Fence a pgvector query
 
-Put the fence in the `where` clause of the query you already have. Postgres inlines `rebac.readable_set` into a
-semi-join on the projection's primary key, so it applies before the `order by` and the `limit`.
+`rebac.fenced_ids(principal, table, query vector, k)` returns the k nearest rows the principal may read, fenced
+before the ordering and the limit, never after.
 
 ```sql
 create extension if not exists vector;
@@ -174,11 +174,10 @@ insert into passage (tenant, container, body, embedding) values
 
 begin;
 set local rebac.tenant = 'acme';
-set local hnsw.iterative_scan = relaxed_order;
-select id, body from passage
-where container in (select * from rebac.readable_set('priya'))
-order by embedding <=> '[1,0,0]'
-limit 20;
+select p.id, p.body
+from rebac.fenced_ids('priya', 'passage', '[1,0,0]'::vector, 20, tenant_col => 'tenant') f
+join passage p on p.id = f.id::bigint
+order by f.distance;
 commit;
 ```
 
@@ -191,8 +190,10 @@ commit;
 
 The board minutes are closest to the query and are not returned: priya cannot view `board`.
 
-Set `hnsw.iterative_scan = relaxed_order` on every fenced HNSW read. Without it, pgvector stops after `ef_search`
-candidates and the fence silently returns fewer than k rows ([measured](/docs/performance/)).
+`rebac.fenced_ids` picks the path by the reader's breadth: below `exact_below_rows` candidate rows (5,000) it sorts
+them exactly, with full recall; above it, it runs the HNSW scan with `hnsw.iterative_scan = relaxed_order` and a
+fence probe per candidate, so it returns all k rows ([measured](/docs/performance/)). For a filter that is not a
+vector ordering, put the set in your own `where` clause: `container in (select * from rebac.readable_set('priya'))`.
 
 ## Next
 

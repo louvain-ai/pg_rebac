@@ -62,8 +62,9 @@ const description =
           <p class="sub">Native relationship-based authorisation for PostgreSQL, pgvector and AI retrieval.</p>
           <p class="lede">
             pg_rebac mirrors SpiceDB's relationships into an indexed readable set. Put it in your
-            <code>where</code> clause and Postgres plans it as one more join, so the fence applies before the
-            <code>order by</code> and the <code>limit</code>.
+            <code>where</code> clause and Postgres plans it as one more join; for a vector search,
+            <code>rebac.fenced_ids</code> returns the k nearest rows a person may read. Either way the fence applies
+            before the <code>order by</code> and the <code>limit</code>.
           </p>
           <div class="actions">
             <a class="btn primary" href="/docs/getting-started/">Get started</a>
@@ -76,32 +77,30 @@ const description =
             <figcaption>The query</figcaption>
             <pre class="code"><code><span class="k">begin</span>;
 <span class="k">set local</span> rebac.tenant = <span class="s">'acme'</span>;
-<span class="k">set local</span> hnsw.iterative_scan = relaxed_order;
 
-<span class="k">select</span> id, body
-<span class="k">from</span> passage
-<span class="k">where</span> <mark>container <span class="k">in</span> (<span class="k">select</span> * <span class="k">from</span> <span class="f">rebac.readable_set</span>(<span class="s">'priya'</span>))</mark>
-<span class="k">order by</span> embedding &lt;=&gt; $1
-<span class="k">limit</span> 20;
+<span class="k">select</span> p.id, p.body
+<span class="k">from</span> <mark><span class="f">rebac.fenced_ids</span>(<span class="s">'priya'</span>, <span class="s">'passage'</span>, $1, 20)</mark> f
+<span class="k">join</span> passage p <span class="k">on</span> p.id = f.id::bigint
+<span class="k">order by</span> f.distance;
 <span class="k">commit</span>;</code></pre>
           </div>
           <div class="pane plan">
             <figcaption>What Postgres plans</figcaption>
             <pre class="code"><code>Limit
-  InitPlan 1  <span class="c">-- (select rebac.checked('priya')), evaluated once</span>
-  <span class="c">-&gt;</span>  Result
-        One-Time Filter: (InitPlan 1).col1
-        <span class="c">-&gt;</span>  Nested Loop
-              <span class="c">-&gt;</span>  Index Scan using passage_embedding_idx on passage
-                    Order By: (embedding &lt;=&gt; '[…]'::vector)
-<mark>              <span class="c">-&gt;</span>  Index Only Scan using readable_pkey on readable r
-                    Index Cond: ((tenant = (InitPlan 2).col1)
-                      AND (principal = 'priya'::text)
-                      AND (container = passage.container))</mark></code></pre>
+  <span class="c">-&gt;</span>  Index Scan using passage_embedding_idx on passage x
+        Order By: (embedding &lt;=&gt; $1)
+        Filter: (SubPlan 1)
+        SubPlan 1
+<mark>          <span class="c">-&gt;</span>  Limit
+                <span class="c">-&gt;</span>  Index Scan using readable_container_idx on readable r
+                      Index Cond: ((tenant = $4)
+                        AND (container = x.container))
+                      Filter: (principal = ANY ($2))</mark></code></pre>
           </div>
           <p class="note">
-            <code>explain (costs off)</code> on Postgres 17 and pgvector 0.8, with two InitPlan result lines left out and
-            the long line wrapped. The HNSW scan stays outside; each candidate costs one primary-key probe.
+            The plan of its HNSW leg, <code>explain (costs off)</code> on Postgres 17 and pgvector 0.8, the long line
+            wrapped. The HNSW scan stays outside; each candidate costs one index probe against the reader and the grant
+            nodes it reads through (<code>$2</code>). A reader with few candidate rows is sorted exactly instead.
           </p>
         </figure>
       </section>

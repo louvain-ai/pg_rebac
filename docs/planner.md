@@ -110,7 +110,7 @@ Modes:
    the tenant's average: 451 containers for a reader of 5. Fed through the `in` form, that estimate produced a
    parallel sequential scan of `rebac.readable` and cost 15 to 25 ms where 1.6 ms was possible. The array form avoids
    it, because the planner treats an InitPlan array as small, and that is what a narrow reader is.
-5. **The choice is the application's, and it is cheap.** `rebac.breadth(p)` is one primary-key read. Routing on it
+5. **The choice is the application's, and it is cheap.** `rebac.breadth(p)` is one indexed read (in 0.3, of the principal's holders). Routing on it
    gave the best of both paths at every breadth in this data. A larger `ef_search` raised the broad readers' recall
    (0.84 to 0.97 at 100%) and changed little for narrow ones, whose recall is bounded by the scan limit.
 
@@ -296,12 +296,64 @@ client), plus: the over-fetch rows were filtered inside Postgres, so no network 
 is counted, which flatters it; and the over-fetched rows are HNSW's approximate top N, so their recall is not
 measured here.
 
+## Grant nodes (0.3)
+
+From 0.3 a reader's set is the rows of its holders: itself and the grant nodes it reads through
+([`design/projection-scale.md`](design/projection-scale.md)). The fence is still one table and one index, and the
+probe is `principal = ANY(holders) AND container = c`, so a plan that puts HNSW outside probes `readable_pkey` per
+candidate as before.
+
+What changes is the estimate. In 0.2 the planner read a principal's row count from the statistics of
+`rebac.readable.principal`, and a broad principal was among the most common values, so it was estimated as broad and
+got the HNSW plan. In 0.3 the holders are an InitPlan value, which the planner cannot see while planning: it
+estimates every reader at about ten times the average holder (171 rows on the 10,000-person tenant below), and a
+reader who is broad through a 20,000-container node gets the exact plan from the `in` form. Three ways round it were
+measured on that tenant, for the broad reader (21,000 containers):
+
+| Holders as | Planner's estimate | Plan | Time |
+|---|---|---|---|
+| an InitPlan (shipped) | 170 rows | hash join and sort of 42,000 passages | 321 ms p50 |
+| a stable call in the qual | 43,219 rows | HNSW outside, probe per candidate | 96 ms: the call is re-evaluated at every probe |
+| a stable call cached per snapshot in a setting | 43,219 rows | HNSW outside, probe per candidate | 16 to 42 ms, and a setting written in a parallel worker is an error |
+| 0.2, one principal's rows | 21,124 rows (most common values) | HNSW outside | 3.3 ms p50 |
+
+Postgres re-evaluates an index scan's runtime keys on every rescan, so a holder list the planner can see is computed
+once per candidate; one it cannot see is computed once per query but gives no estimate. So 0.3 keeps the InitPlan,
+and `rebac.fenced_ids` does the routing: it counts the reader's candidate rows, sorts below `exact_below_rows`, and above it
+writes the HNSW leg as a probe per candidate (a sub-select with `limit 1` that the planner cannot turn into a join).
+For a reader whose breadth comes from its own rows the `in` form plans as in 0.2.
+
+### Measured at 100,000 people
+
+`examples/projection-scale/`: 100,000 containers with UUID-length ids; teams of 20, departments of 500, an
+all-company group and 20 direct shares per person; one person in 10,000 is also in a group granted 20,000 containers.
+200,000 passages of 768 dimensions, HNSW at the defaults, k = 20, one client, 300 queries per cell. Apple M1 Max,
+Docker Desktop with 10 CPUs and 16 GB, Postgres 17, pgvector 0.8, `shared_buffers` 4 GB. 0.2 is the v0.2.0 SQL with
+every grant expanded per person (112,677,957 rows, 26.9 GB); 0.3 holds group grants once (746,531 rows and 300,010
+memberships, 0.30 GB). p50 / p95, and recall@20 against the exact answer:
+
+| Reader | Breadth | Form | 0.2 | 0.3 |
+|---|---|---|---|---|
+| typical | 1,125 | `rebac.fenced_ids` (exact path) | 17.5 / 42.5 ms, 1.0 | 13.7 / 14.9 ms, 1.0 |
+| typical | 1,125 | `= any(array(...))`, exact | 17.8 / 26.6 ms | 13.8 / 16.4 ms |
+| typical | 1,125 | `in`, `relaxed_order` | 24.8 / 36.4 ms | 15.2 / 17.7 ms |
+| broad | 21,000 | `rebac.fenced_ids` (ANN path) | 21.2 / 110 ms, 0.975 | 20.1 / 32.1 ms, 0.965 |
+| broad | 21,000 | `= any(array(...))`, exact | 166 / 187 ms | 195 / 208 ms |
+| broad | 21,000 | `in`, `relaxed_order` | 87 / 132 ms (exact plan) | 283 / 329 ms (exact plan) |
+
+At this size the planner did not choose the HNSW plan for the broad reader's `in` form in either version; in 0.2 at
+10,000 people it did (3.3 ms). `rebac.fenced_ids` is as fast in 0.3 as in 0.2 for both readers, and faster at p95.
+
 ## Recommendations
 
-- Fence an ANN leg with `container in (select * from rebac.readable_set(p))` and `set local hnsw.iterative_scan =
-  relaxed_order`.
+- Fence a vector search with `rebac.fenced_ids(p, tbl, q, k)`: it routes each reader to the exact path or the fenced
+  HNSW scan by its candidate rows, and keeps the HNSW scan outside for broad readers (measured above).
+- Written by hand, fence an ANN leg with `container in (select * from rebac.readable_set(p))` and `set local
+  hnsw.iterative_scan = relaxed_order`.
 - Route readers below a few thousand candidate rows to the exact path, as
   `container = any(array(select * from rebac.readable_set(p)))`, using `rebac.breadth(p)`.
+- With grant nodes, use `rebac.fenced_ids` for a vector leg: the `in` form cannot see a reader's breadth through its
+  nodes (above).
 - `rebac.fenced_ids(p, tbl, q, k)` routes by itself: it counts the reader's candidate rows
   up to `exact_below_rows` (default 5,000) and sorts them exactly below it, or runs the fenced HNSW scan with
   `relaxed_order` above it. Measured on the 128-dimension data (k = 20, p50):

@@ -30,8 +30,12 @@ The SQL is installed separately, with `psql` or your migrations. No published im
   deleted. A relation SpiceDB's schema does not have yet is deferred, not quarantined, for a 10-minute settle
   window, to survive a rolling deploy.
 - **Refresh.** Re-projects queued principals with LookupResources, at least as fresh as the write that queued them.
-- **Sweep.** Every `sweep_interval_ms` (15 minutes) re-projects principals at low priority and re-sends each recent
-  revocation once, after `sweep_settle_ms` (5 minutes).
+  A principal's refresh also asks which subject sets it is a member of (one LookupResources per set relation) and
+  stores only what none of its grant nodes holds. A grant node is refreshed the same way, with the set itself as the
+  subject; a wildcard's node is looked up as `wildcard_probe` and kept to the containers mirrored as granted to the
+  wildcard.
+- **Sweep.** Every `sweep_interval_ms` (15 minutes) re-projects principals and grant nodes at low priority and
+  re-sends each recent revocation once, after `sweep_settle_ms` (5 minutes).
 - **Heartbeat.** Beats every `heartbeat_ms` while both SpiceDB and Postgres answer. See
   [the two bounds](/docs/concepts/consistency/#two-bounds-liveness-and-freshness). A beat is liveness, not
   freshness.
@@ -101,7 +105,10 @@ disagree:
 | `max_staleness_ms` | 5000 (liveness: the daemon's heartbeat) |
 | `max_projection_age_ms` | 3600000 (freshness: each set's last lookup; keep it above `sweep_interval_ms`) |
 | `empty_ttl_ms` | 60000 |
-| `max_containers_per_principal` | 100000 |
+| `max_containers_per_principal` | 100000 (a principal's own rows; what it reads through grant nodes is not counted) |
+| `max_containers_per_node` | 1000000 (a grant node's rows; over it the node is unavailable and its members read `RB503`) |
+| `node_grants` | `on` (a grant to a subject set or a wildcard is stored once, under its grant node; `off` expands it per principal, as 0.2 did) |
+| `wildcard_probe` | `__rebac_anyone__` (the id a wildcard node is looked up as: SpiceDB cannot look up `user:*`; grant nothing to it) |
 | `narrow_lock_timeout_ms` | 5000 |
 | `watch_grace_ms` | 5000 (with Watch on: how long a set stays readable after both its lookup and the stream's last current moment) |
 
@@ -126,6 +133,8 @@ pooler in transaction mode, a session-level advisory lock belongs to whichever s
 In **live** mode the daemon relays the outbox and keeps `rebac.readable`.
 
 In **shadow** mode it writes `rebac.readable_shadow` and never `rebac.readable`, relays nothing and re-sends nothing.
+It expands every grant per principal there, whatever `node_grants` says, so the shadow is the reference to compare a
+live projection's grant nodes against.
 It still stores the closure in `rebac.view_relation` and mirrors arrows and set grants it reads in a backfill. Use it to prove a
 projection against your SpiceDB before anything reads it, then compare with `rebacd verify --shadow`.
 
@@ -184,7 +193,9 @@ curl -X POST localhost:7341/lookup -H 'content-type: application/json' \
 ```
 
 The answer is written down, an empty one included. If SpiceDB cannot answer, the reply is a 503, the principal is
-marked unavailable (`RB503` on the next read, never an empty set) and queued for retry.
+marked unavailable (`RB503` on the next read, never an empty set) and queued for retry. A grant node the principal
+reads through that a read would refuse (stale, from before a Watch gap or a closure change, or unavailable) is
+re-projected in the same call. `containers` counts the principal's own rows. A node name (`#…`) is a 400.
 
 The reply names how many containers the principal reads, and any caller can make the daemon ask SpiceDB. So
 `POST /lookup`, `GET /status` and `GET /metrics` are for your application only:
@@ -219,8 +230,9 @@ The test suite runs these against a real TLS Postgres.
 rebacd backfill --tenant acme
 ```
 
-Pages through the tenant's relationships with ReadRelationships, projects every principal they name with
-LookupResources, and mirrors the tenant's arrow edges. It prints one JSON line and exits 1 if any principal failed.
+Pages through the tenant's relationships with ReadRelationships, mirrors the tenant's arrow edges and its grants to
+subject sets and wildcards, projects every grant node they name and then every principal. It prints one JSON line and
+exits 1 if any principal failed.
 
 ## verify
 
@@ -234,7 +246,8 @@ rebacd verify --closure                      # rebac.view_relation against the l
 rebacd verify --all-tenants [--shadow]       # one line of totals, for a scheduled job
 ```
 
-Extra rows (the projection grants what SpiceDB does not) are a fence violation and exit 2. Missing rows (SpiceDB
+Each principal's set is compared as it reads it, through its grant nodes. Extra rows (the projection grants what
+SpiceDB does not) are a fence violation and exit 2. Missing rows (SpiceDB
 grants what the projection lacks yet) are a freshness gap, reported separately and never summed with extras. A
 closure mismatch also exits 2.
 

@@ -3,16 +3,40 @@
 ## Guarantees
 
 1. **G1, the fence precedes the read.** Every row a query fenced by `rebac.readable_set` returns lies in a container
-   that `rebac.readable` holds for (tenant, principal), at the snapshot the query reads. No row is returned unless
+   that `rebac.readable` holds for one of the principal's holders, at the snapshot the query reads. A principal's
+   holders are the principal itself and the grant nodes it reads through (below). No row is returned unless
    `rebac.checked` has passed for that query. (A query that is empty for another reason may return empty without
    evaluating it.)
+
+   **Grant nodes** (`node_grants = on`, the default). A grant to a subject set (`container#member@group:eng#member`)
+   or a wildcard (`container#member@user:*`) is stored once, under its node, rather than once per member:
+   - A node is a holder whose name starts with `#`, such as `#group:eng#member` or `#user:*`. No principal may use a
+     name like that, and `rebac.checked` refuses one with `RB400`.
+   - Each node is looked up in SpiceDB with the node itself as the subject and projected like a principal, under the
+     same lock and its own cap (`max_containers_per_node`).
+   - A principal's memberships of subject sets come from SpiceDB in the principal's own refresh
+     (`rebac.node_member`). A wildcard node stands for every principal that has a subject of its type.
+   - A wildcard node is looked up as a stand-in subject (`wildcard_probe`), because SpiceDB cannot look up `user:*`.
+     The answer is intersected with the mirrored wildcard grants and what sits under them, so a grant made to the
+     stand-in itself widens nobody.
+
+   A node's set is what SpiceDB answers for the set itself as the subject. A member stands in every relationship that
+   names its set, so SpiceDB grants each member at least that set. A principal stores only what none of its nodes
+   holds. That subtraction saves space but nothing relies on it: a row kept both ways is
+   still narrowed by every revocation below.
 2. **G2, a revocation is in force at commit.** A view revocation written through `rebac.write` is absent from
    the projection for every affected principal when the writing transaction commits, whether or not SpiceDB or the
    daemon is up. That holds exactly for:
    - direct relations;
    - the relations reached through an arrow (`workspace->admin`);
-   - memberships of subject sets;
+   - memberships of subject sets (the membership row goes, so nothing the node holds is read by that member, and
+     neither is the member's own copy of it);
+   - grants to subject sets, including those made through a via relation (`workspace#admin@group:ops#member`, mirrored
+     in `rebac.set_grant` with the object typed, `workspace:w1`; 0.1.0 to 0.2.0 did not narrow these at commit);
    - wildcard grants on the projected type (`container#member@user:*`).
+
+   A removal narrows the node's rows and every member's own copies of them, together with what is under them through
+   self-arrows.
    If a lock cannot be taken within `narrow_lock_timeout_ms`, the COMMIT fails; it never commits an unnarrowed
    revocation.
 
@@ -21,7 +45,9 @@
    are. Every projection writer (a refresh, a lazy first read, a retirement) holds its tenant shared, then its
    principal, from before it asks SpiceDB until it commits. So a refresh in flight commits before the holders are read
    (and its row is narrowed), and a refresh that starts later waits for the commit (and subtracts the revocation as
-   pending). `tests/sql/09_revocation_race.sql` drives both orders. The cost: such a revocation waits for every refresh
+   pending). A grant node is a principal in this order: its refresh takes its own lock, and a removal that narrows
+   it takes that lock. `tests/sql/09_revocation_race.sql` and `19_node_races.sql` drive both orders, for principals,
+   nodes and memberships. The cost: such a revocation waits for every refresh
    of its tenant in flight, within `narrow_lock_timeout_ms`. The relay's own re-narrowing of the deletes it
    delivers takes no tenant lock, so a relay waiting on SpiceDB never holds such a revocation up.
 
@@ -37,9 +63,10 @@
    "Pending" ends when the relay delivers the delete. A refresh looked up `at_least_as_fresh` an OLDER token after
    that may, by SpiceDB's consistency rules, be served from a revision up to the revision quantization window
    (5 s by default) before the delete. For a direct relation this heals within seconds: the delivery queues that
-   principal's refresh at the delete's token. For an arrow tuple or a grant to a subject set, the holders it narrowed
-   are not named by the delivery, so a container regrown this way stays until the sweep re-sends the revocation
-   (after `sweep_settle_ms`) or re-projects them. This is reasoned from SpiceDB's documented semantics, not observed.
+   principal's refresh at the delete's token. An arrow tuple, a grant to a subject set or a wildcard names nobody, so
+   its narrowing records whom it narrowed on the outbox row (`narrowed`, and `narrowed_containers` for what grant
+   nodes lost). Its delivery re-projects them at the delete's token, so a container regrown this way heals the same
+   way. This is reasoned from SpiceDB's documented semantics, not observed.
    `consistency = "fully_consistent"` closes it.
 4. **G4, at least as fresh.** A refresh queued by a delivery is looked up at `at_least_as_fresh` the token SpiceDB
    wrote that delivery at. A first read, and anything with no token, is looked up fully consistent.
@@ -51,11 +78,15 @@
    - An unknown principal is `RB404`.
    - A missing tenant is `RB400`.
    - A daemon that is not live, a set older than the freshness bound or of unknown age, an unavailable lookup and an
-     over-cap set are each `RB503`.
+     over-cap set are each `RB503`. So is a principal reading through a grant node that is unavailable, over its
+     cap or stale.
+   - A node name read as a principal is `RB400`.
    - None of these is an empty set, or a wider one.
 
 7. **G7, freshness.** A principal's set is read only while the SpiceDB lookup behind it began within
-   `max_projection_age_ms` (one hour by default) of the read; a set with no lookup time is never read. The lookup time
+   `max_projection_age_ms` (one hour by default) of the read; a set with no lookup time is never read. With grant
+   nodes, the lookup behind a set is the oldest of the principal's own and those of its nodes. The Watch gap, the
+   Watch grace and the closure's last change are checked against that same oldest lookup. The lookup time
    is taken from the database's clock just before SpiceDB is asked. A lookup made `fully_consistent` reflects every
    relationship SpiceDB held at that instant. One made `at_least_as_fresh` a token may be served from a revision up
    to SpiceDB's revision quantization older (`--datastore-revision-quantization-interval`, 5 s by default). Narrowing
@@ -178,9 +209,23 @@
 - **Caveats, expiring relationships and exclusion** are refused at start, not evaluated.
 - **A read replica** holds G2 only once its replay has passed the commit.
 - **Projection rows written by anything but `rebac.project`** (an application's own mirror into `rebac.readable`) do
-  not take the lock order, so G2's race argument does not cover them.
+  not take the lock order, so G2's race argument does not cover them. Such a mirror must not write a holder whose
+  name starts with `#`, because members read that holder's rows as a grant node's.
+- **Grant nodes save storage and grant fan-out, not lookups.** A principal's refresh still asks SpiceDB for its whole
+  readable set (SpiceDB does not say through which path a container is held), plus one membership lookup per
+  subject-set relation. A sweep therefore costs SpiceDB at least what it did in 0.2. `docs/design/projection-scale.md`
+  has the measurements.
+- **Upgrading from 0.2** keeps 0.2's expanded rows, which read correctly. rebacd 0.3 re-reads every tenant's
+  relationships once at its first start (`remirror_pending`) to mirror what 0.2 did not, grants to sets through a via
+  relation and wildcard grants; until it has, leaving such a set waits for a refresh, as in 0.2. A grant
+  to a set reaches such a principal only once it is re-projected. The first install of 0.3 forces a sweep to do that.
 
 ## Design decisions
+
+- **Grant nodes live in the same table as principals' rows.** The fence then reads one table through one index
+  (`principal = ANY(holders) AND container = c`), so a fenced HNSW scan keeps the plan of 0.2: the HNSW index
+  outside and one index probe per candidate inside. A two-table union was measured first. It lost that shape: the
+  planner chose a hash join over a sequential scan at 5% to 30% breadth.
 
 - **The planner-shaped primitive is the set, not the boolean.** Postgres never inlines a scalar SQL function whose
   body has a sub-select, so `readable_by(p, c)` written as `exists (...)` is a per-row function call. Measured with

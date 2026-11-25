@@ -39,6 +39,15 @@ cost about the same as the fence in the query. For a query that reads many rows,
 the scan, not a join: counting a narrow reader's 501 rows took 0.6 ms with the fence in the query and 17 ms through
 the policy. A policy that calls a check function per row took 3.4 s, whatever the reader.
 
+## How large does the projection get?
+
+A grant to a person is one row per container. A grant to a group or to everyone is one row per container, held by the
+group's grant node, plus one membership row per member: it is not multiplied by the number of members. Measured on the
+benchmark's tenant (teams, departments, an all-company group and 20 direct shares per person, 100,000 containers,
+UUID-length ids), the projection takes the sizes in [Performance](/docs/performance/#projection-scale), against 0.2's
+one row per person per container. The cap on what one person stores, `max_containers_per_principal`, now counts only
+their own grants.
+
 ## How does it compare with AuthZed Materialize and the SpiceDB FDW?
 
 Both are AuthZed's. As their docs describe them on 2026-11-24:
@@ -122,6 +131,13 @@ statement is `create … if not exists`, `create or replace` or an `alter … if
 keeps the projection. Then restart `rebacd` on the same release. The CHANGELOG names each upgrade that makes reads
 `RB503` until principals are re-projected (0.1 to 0.2 records one Watch gap): run `rebacd backfill --tenant <t>` per
 tenant first, or let the forced sweep do it, and `POST /lookup` re-projects any one principal at once.
+
+From 0.2 to 0.3, reads stay open throughout on 0.2's rows, which hold every grant expanded per principal. The install
+forces one sweep, which records each principal's memberships and moves group and wildcard grants under their grant
+nodes; until a principal is re-projected, a new grant to a set reaches it only through that refresh. rebacd 0.3 also
+re-reads every tenant's relationships once at its first start, to mirror what 0.2 did not (grants to sets through a
+via relation, wildcard grants); until it has, leaving such a set waits for a refresh, as it did in 0.2. Upgrade every `rebacd` with the SQL, or set `node_grants = 'off'` while a 0.2 daemon still runs.
+`rebac.node_member` is new, so re-run the daemon role's grants.
 
 ## Who maintains it?
 

@@ -4,7 +4,7 @@ description: When to fence an HNSW ordering, when to sort exactly, and the itera
 ---
 
 A fenced vector read has two shapes. Which one is right depends on how much of the tenant the reader can see,
-which `rebac.breadth(p)` tells you in one primary-key read.
+which `rebac.breadth(p)` tells you from one indexed read of the principal's holders (itself and its grant nodes).
 
 ## The ANN path
 

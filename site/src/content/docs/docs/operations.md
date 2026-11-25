@@ -25,6 +25,10 @@ select * from rebac.status();
 | `oldest_lookup_ms` | Freshness: age of the oldest lookup behind any projected set. |
 | `unfresh_principals` | Sets past `max_projection_age_ms`, or of unknown age, which read as `RB503`. |
 
+Grant nodes (holders named `#…`, one per subject set or wildcard a grant names) are counted with the principals in
+these columns: an unfresh or unavailable node fails every member closed, so it belongs in the same alert. List them
+with `select * from rebac.principal_state where rebac.is_node(principal)`.
+
 `select * from rebac.freshness()` breaks freshness down per tenant: principals, the oldest lookup, how many are
 unknown or past the bound, the refresh queue and the oldest undelivered write.
 

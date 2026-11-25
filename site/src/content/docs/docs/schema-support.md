@@ -15,8 +15,9 @@ The projected permission may be any union (`+`) of:
 - **a self-arrow** (`parent->view`), a container under another container;
 - **an arrow to another type and a relation there** (`workspace->admin`);
 - **subject sets one level deep** (`group#member`, where `group#member` holds plain object types);
-- **wildcards** (`user:*`) on a relation of the projected type. A wildcard grant refreshes
-  every principal the tenant knows; its removal narrows every holder of the container at commit, like an arrow's.
+- **wildcards** (`user:*`) on a relation of the projected type. A wildcard grant is stored once, under the
+  wildcard's grant node, which every principal with a subject of that type reads through; its removal narrows the
+  node, and every holder of the container, at commit.
 
 A schema of the shape the tests are built on:
 
@@ -47,13 +48,15 @@ does:
 
 | Kind | Example | A touch | A delete |
 |---|---|---|---|
-| `direct` | `container#member` | refreshes the subject | narrows the subject at commit |
-| `arrow` | `container#parent`, `container#workspace` | mirrored into `rebac.edge`; refreshes the parent's readers | narrows every holder of the child |
+| `direct` | `container#member` | refreshes the subject (a set's or a wildcard's grant node, for a grant to one) | narrows the subject at commit |
+| `arrow` | `container#parent`, `container#workspace` | mirrored into `rebac.edge`; refreshes the parent's readers and the grant nodes that view it | narrows every holder of the child, grant nodes included |
 | `via` | `workspace#admin` | refreshes the subject | narrows the containers whose arrow points at it, found through `rebac.edge` |
-| `set` | `group#member` | refreshes the member | narrows the member from what the set was granted |
+| `set` | `group#member` | refreshes the member | removes the membership, and the member's own copies of what the set holds |
 
-Grants to a subject set are mirrored in `rebac.set_grant`, so a membership's removal narrows at commit with SpiceDB
-down.
+With grant nodes on (`node_grants`, the default) a grant to a subject set or a wildcard is stored once, under its
+node, and read by every member at query time ([the readable set](/docs/concepts/readable-set/)). Grants to a subject
+set, through a direct or a via relation, are mirrored in `rebac.set_grant`, so a membership's removal narrows at
+commit with SpiceDB down.
 
 The stored closure is checked against the live schema each time the daemon starts. A difference refuses the start
 until you accept it ([rebacd](/docs/rebacd/#the-schema-at-start)). `rebacd verify --closure` checks it on demand.

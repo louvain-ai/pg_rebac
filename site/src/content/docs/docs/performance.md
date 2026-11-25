@@ -120,6 +120,40 @@ Every form returned the same rows. p50 in ms:
 Rows kept are about N × breadth / k, so N must be chosen per reader, and a fixed N starves narrow readers silently.
 The filter ran inside Postgres, so no transfer of N rows to an application was counted, which flatters it.
 
+## Projection scale
+
+0.3 stores a grant to a group or to everyone once, under its grant node, instead of once per member
+([the readable set](/docs/concepts/readable-set/)). Measured with `examples/projection-scale/` on one tenant of 100,000
+containers with UUID-length ids: teams of 20 granted 5 containers each, departments of 500 granted 100, an all-company
+group granted 1,000, 20 direct shares per person, and one person in 10,000 in a group granted 20,000. A typical reader
+reads 1,125 containers, a broad one 21,000. 200,000 passages of 768 dimensions, HNSW at the defaults, k = 20, one
+client. Apple M1 Max, Docker with 10 CPUs and 16 GB, Postgres 17 and pgvector 0.8. "0.2" is the v0.2.0 SQL with
+every grant expanded per person.
+
+Storage:
+
+| Principals | Layout | Rows in `rebac.readable` | of them grant nodes' | Memberships | Size (tables and indexes) | Per principal |
+|---|---|---|---|---|---|---|
+| 10,000 | 0.2 | 11,267,769 | 0 | 0 | 2.7 GB | 270.0 kB |
+| 10,000 | 0.3 | 174,369 | 25,500 | 30,001 | 60 MB | 6.0 kB |
+| 100,000 | 0.2 | 112,677,957 | 0 | 0 | 26.9 GB | 269.3 kB |
+| 100,000 | 0.3 | 746,531 | 66,000 | 300,010 | 302 MB | 3.0 kB |
+| 1,000,000 | 0.3 | 6,273,922 | 471,000 | 3,000,100 | 2.7 GB | 2.7 kB |
+
+Fenced vector search at 100,000 people (p50 / p95, recall@20):
+
+| Reader | Breadth | `rebac.fenced_ids` | 0.2 | 0.3 |
+|---|---|---|---|---|
+| typical | 1,125 | exact path | 17.5 / 42.5 ms, 1.0 | 13.7 / 14.9 ms, 1.0 |
+| broad | 21,000 | ANN path | 21.2 / 110.1 ms, 0.975 | 20.1 / 32.1 ms, 0.965 |
+
+At a million people 0.3 answered the same readers in 14.6 and 20.3 ms p50. Use `rebac.fenced_ids` for vector search:
+the planner cannot see a reader's breadth through its grant nodes, so the bare `in` form plans a broad reader as an
+exact sort (283 ms p50 here). For other filters the `in` form is unchanged.
+
+The design, the attempts to keep 0.2's plan for the `in` form, and the sweep against SpiceDB are in
+[`docs/design/projection-scale.md`](https://github.com/louvain-ai/pg_rebac/blob/main/docs/design/projection-scale.md).
+
 ## Write side: a refresh is a diff
 
 A refresh re-projects a principal from SpiceDB. `rebac.project` writes only the difference from the stored set,
