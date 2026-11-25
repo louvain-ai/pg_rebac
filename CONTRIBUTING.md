@@ -72,15 +72,16 @@ A release is one act: merging the release pull request.
   workflow checks the tag against every manifest and runs the SQL suite, then publishes in order: crates.io
   (`rebac-schema`, then `rebacd`), npm (with provenance), the `ghcr.io/louvain-ai/rebacd` image (linux/amd64 and
   linux/arm64, with an SBOM and provenance, signed with cosign), the Release's assets (the SQL, `SHA256SUMS`, the
-  PGXN zip), PGXN. Last, it runs the served quickstart against what it published. Every step skips what is
-  already published, so a failed run is fixed by running it again.
+  PGXN zip), PGXN. Last, it runs the served quickstart against what it published and deploys pgrebac.com from the
+  tag's tree, so the site never shows unreleased docs. Every step skips what is already published, so a failed run
+  is fixed by running it again.
 - **A dry run** builds and checks everything and publishes nothing:
   `gh workflow run publish.yml --ref vX.Y.Z -f tag=vX.Y.Z` (`dry-run` defaults to true).
 - **A patch for an older minor version** is released from a maintenance branch `release-X.Y`, cut from the last
   `vX.Y.Z` tag, with this setup on it, `"versioning": "always-bump-patch"` in its `release-please-config.json` and
   `.release-please-manifest.json` set to `X.Y.Z`. Fixes are cherry-picked onto it, and release-please keeps a
-  release pull request there too. Its releases move neither npm's `latest` dist-tag, the image's `latest` tag nor
-  the GitHub Release marked latest.
+  release pull request there too. Unless it is the highest version, its release moves neither npm's `latest`
+  dist-tag, the image's `latest` tag, the GitHub Release marked latest nor the site.
 - **The manual fallback**, when GitHub Actions cannot run the release: `scripts/release.sh X.Y.Z` from the release
   commit. It asks before each step and skips what is published; run it with `--dry-run` first.
 

@@ -1,8 +1,9 @@
 # Publishes a release tag everywhere, in order: crates.io (rebac-schema, then rebacd), npm, the ghcr.io image, the
-# GitHub Release's assets, PGXN. Every step skips what is already published, so a failed run is fixed by running it
-# again. release-please.yml starts it when a release pull request is merged; by hand:
+# GitHub Release's assets, PGXN; then it runs the served quickstart and deploys pgrebac.com from the tag. Every step
+# skips what is already published, so a failed run is fixed by running it again. release-please.yml starts it when a
+# release pull request is merged; by hand:
 #
-#   gh workflow run publish.yml --ref v0.3.0 -f tag=v0.3.0                 # dry run: builds everything, publishes nothing
+#   gh workflow run publish.yml --ref v0.3.0 -f tag=v0.3.0                  # dry run: builds and checks, publishes nothing
 #   gh workflow run publish.yml --ref v0.3.0 -f tag=v0.3.0 -f dry-run=false
 name: publish
 
@@ -310,3 +311,25 @@ jobs:
             { echo "::notice::site/public/quickstart.yml is not bundled for $VERSION; nothing to check"; exit 0; }
           docker compose -f site/public/quickstart.yml run --rm demo 2>&1 | tee out
           examples/quickstart/check-output.sh out
+
+  # pgrebac.com is deployed from the latest release's tree, never from main, so the docs describe what is released.
+  # A maintenance release that is not the latest leaves the site alone. Without a token the job warns and stops.
+  site:
+    needs: [plan, quickstart]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.latest == 'true' && inputs.dry-run == false }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    env:
+      VERCEL_ORG_ID: team_xSm5id21v5bGUARdPAlzyCM4
+      VERCEL_PROJECT_ID: prj_fFpLXPpsmjD6SWybv3znuHOCN2TY # pgrebac-site
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - run: |
+          [ -n "$VERCEL_TOKEN" ] || { echo "::warning::No VERCEL_TOKEN: deploy pgrebac.com from $TAG by hand"; exit 0; }
+          npx --yes vercel@66.6.0 deploy --prod --yes --token "$VERCEL_TOKEN"
