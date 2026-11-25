@@ -9,6 +9,7 @@
 # docker-compose.yml is the same demo built from a clone instead, for trying a change from a checkout.
 #
 #   examples/quickstart/bundle.sh 0.1.1     # after a release: point the file at it
+#   examples/quickstart/bundle.sh 0.1.1 dist/pg_rebac--0.1.1.sql   # before it: hash the SQL scripts/release-sql.sh made
 #   examples/quickstart/bundle.sh --check   # CI: fail if the file is not what this directory would write
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,9 +21,13 @@ if [ "${1:-}" = "--check" ]; then
   version="$(sed -n 's/^# pg_rebac version: //p' "$out")"
   sha="$(sed -n 's/^# SQL SHA-256: //p' "$out")"
 else
-  version="${1:?usage: bundle.sh <released version> | --check}"
-  sha="$(curl -fsSL "https://github.com/louvain-ai/pg_rebac/releases/download/v$version/pg_rebac--$version.sql" |
-         shasum -a 256 | cut -d' ' -f1)"
+  version="${1:?usage: bundle.sh <released version> [its SQL file] | --check}"
+  if [ -n "${2:-}" ]; then
+    sha="$(shasum -a 256 "$2" | cut -d' ' -f1)"
+  else
+    sha="$(curl -fsSL "https://github.com/louvain-ai/pg_rebac/releases/download/v$version/pg_rebac--$version.sql" |
+           shasum -a 256 | cut -d' ' -f1)"
+  fi
 fi
 
 # A config's content, indented under `content: |`, with `$` doubled so Compose does not interpolate it.
